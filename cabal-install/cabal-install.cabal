@@ -124,7 +124,17 @@ Library
                    zlib     >= 0.5.3    && < 0.6,
                    time     >= 1.1      && < 1.5,
                    mtl      >= 2.0      && < 3,
-                   stm      >= 2.0      && < 3
+                   stm      >= 2.0      && < 3,
+
+                   -- related to HTTPS and http-conduit
+                   -- (in Distribution.Client.HttpUtils)
+                   http-types >= 0.7,
+                   http-conduit >= 1.8.7.1,
+                   transformers >= 0.3.0.0,
+                   case-insensitive >= 0.4.0.3,
+                   tls >= 1.0.2,
+                   data-default >= 0.5.0
+
 
     if flag(old-base)
       build-depends: base < 3
