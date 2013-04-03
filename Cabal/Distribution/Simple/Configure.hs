@@ -103,7 +103,8 @@ import Distribution.Simple.Setup
 import Distribution.Simple.InstallDirs
     ( InstallDirs(..), defaultInstallDirs, combineInstallDirs )
 import Distribution.Simple.LocalBuildInfo
-    ( LocalBuildInfo(..), ComponentLocalBuildInfo(..)
+    ( LocalBuildInfo(..), Component(..), ComponentLocalBuildInfo(..)
+    , LibraryName(..)
     , absoluteInstallDirs, prefixRelativeInstallDirs, inplacePackageId
     , ComponentName(..), showComponentName, pkgEnabledComponents
     , componentBuildInfo, componentName, checkComponentsCyclic )
@@ -115,7 +116,7 @@ import Distribution.Simple.Utils
     , withFileContents, writeFileAtomic
     , withTempFile )
 import Distribution.System
-    ( OS(..), buildOS, Arch(..), buildArch, buildPlatform )
+    ( OS(..), buildOS, Arch(..), Platform(..), buildPlatform )
 import Distribution.Version
          ( Version(..), anyVersion, orLaterVersion, withinRange, isAnyVersion )
 import Distribution.Verbosity
@@ -137,7 +138,7 @@ import Control.Monad
 import Data.List
     ( nub, partition, isPrefixOf, inits )
 import Data.Maybe
-    ( isNothing, catMaybes )
+    ( isNothing, catMaybes, fromMaybe )
 import Data.Monoid
     ( Monoid(..) )
 import System.Directory
@@ -163,7 +164,7 @@ tryGetConfigStateFile filename = do
     then return (Left missing)
     else withFileContents filename $ \str ->
       case lines str of
-        [headder, rest] -> case checkHeader headder of
+        [header, rest] -> case checkHeader header of
           Just msg -> return (Left msg)
           Nothing  -> case reads rest of
             [(bi,_)] -> return (Right bi)
@@ -287,7 +288,7 @@ configure (pkg_descr0, pbi) cfg
                             (configPackageDBs cfg)
 
         -- detect compiler
-        (comp, programsConfig') <- configCompiler
+        (comp, compPlatform, programsConfig') <- configCompiler
           (flagToMaybe $ configHcFlavor cfg)
           (flagToMaybe $ configHcPath cfg) (flagToMaybe $ configHcPkg cfg)
           programsConfig (lessVerbose verbosity)
@@ -340,7 +341,7 @@ configure (pkg_descr0, pbi) cfg
                 case finalizePackageDescription
                        (configConfigurationsFlags cfg)
                        dependencySatisfiable
-                       Distribution.System.buildPlatform
+                       compPlatform
                        (compilerId comp)
                        (configConstraints cfg)
                        pkg_descr0''
@@ -492,6 +493,7 @@ configure (pkg_descr0, pbi) cfg
                                                -- did they would go here.
                     installDirTemplates = installDirs,
                     compiler            = comp,
+                    hostPlatform        = compPlatform,
                     buildDir            = buildDir',
                     scratchDir          = fromFlagOrDefault
                                             (distPref </> "scratch")
@@ -792,7 +794,7 @@ ccLdOptionsBuildInfo cflags ldflags =
 -- -----------------------------------------------------------------------------
 -- Determining the compiler details
 
-configCompilerAux :: ConfigFlags -> IO (Compiler, ProgramConfiguration)
+configCompilerAux :: ConfigFlags -> IO (Compiler, Platform, ProgramConfiguration)
 configCompilerAux cfg = configCompiler (flagToMaybe $ configHcFlavor cfg)
                                        (flagToMaybe $ configHcPath cfg)
                                        (flagToMaybe $ configHcPkg cfg)
@@ -805,18 +807,19 @@ configCompilerAux cfg = configCompiler (flagToMaybe $ configHcFlavor cfg)
 
 configCompiler :: Maybe CompilerFlavor -> Maybe FilePath -> Maybe FilePath
                -> ProgramConfiguration -> Verbosity
-               -> IO (Compiler, ProgramConfiguration)
+               -> IO (Compiler, Platform, ProgramConfiguration)
 configCompiler Nothing _ _ _ _ = die "Unknown compiler"
 configCompiler (Just hcFlavor) hcPath hcPkg conf verbosity = do
-  case hcFlavor of
-      GHC  -> GHC.configure  verbosity hcPath hcPkg conf
-      JHC  -> JHC.configure  verbosity hcPath hcPkg conf
-      LHC  -> do (_,ghcConf) <- GHC.configure  verbosity Nothing hcPkg conf
-                 LHC.configure  verbosity hcPath Nothing ghcConf
-      Hugs -> Hugs.configure verbosity hcPath hcPkg conf
-      NHC  -> NHC.configure  verbosity hcPath hcPkg conf
-      UHC  -> UHC.configure  verbosity hcPath hcPkg conf
-      _    -> die "Unknown compiler"
+  (comp, maybePlatform, programsConfig) <- case hcFlavor of
+    GHC  -> GHC.configure  verbosity hcPath hcPkg conf
+    JHC  -> JHC.configure  verbosity hcPath hcPkg conf
+    LHC  -> do (_, _, ghcConf) <- GHC.configure  verbosity Nothing hcPkg conf
+               LHC.configure  verbosity hcPath Nothing ghcConf
+    Hugs -> Hugs.configure verbosity hcPath hcPkg conf
+    NHC  -> NHC.configure  verbosity hcPath hcPkg conf
+    UHC  -> UHC.configure  verbosity hcPath hcPkg conf
+    _    -> die "Unknown compiler"
+  return (comp, fromMaybe buildPlatform maybePlatform, programsConfig)
 
 
 -- -----------------------------------------------------------------------------
@@ -852,18 +855,33 @@ mkComponentsLocalBuildInfo pkg_descr internalPkgDeps externalPkgDeps =
     -- needs. Note, this only works because we cannot yet depend on two
     -- versions of the same package.
     componentLocalBuildInfo component =
-      ComponentLocalBuildInfo {
-        componentPackageDeps =
-          if newPackageDepsBehaviour pkg_descr
-            then [ (installedPackageId pkg, packageId pkg)
-                 | pkg <- selectSubset bi externalPkgDeps ]
-              ++ [ (inplacePackageId pkgid, pkgid)
-                 | pkgid <- selectSubset bi internalPkgDeps ]
-            else [ (installedPackageId pkg, packageId pkg)
-                 | pkg <- externalPkgDeps ]
-      }
+      case component of
+      CLib _ ->
+        LibComponentLocalBuildInfo {
+          componentPackageDeps = cpds,
+          componentLibraries = [LibraryName ("HS" ++ display (package pkg_descr))]
+        }
+      CExe _ ->
+        ExeComponentLocalBuildInfo {
+          componentPackageDeps = cpds
+        }
+      CTest _ ->
+        TestComponentLocalBuildInfo {
+          componentPackageDeps = cpds
+        }
+      CBench _ ->
+        BenchComponentLocalBuildInfo {
+          componentPackageDeps = cpds
+        }
       where
         bi = componentBuildInfo component
+        cpds = if newPackageDepsBehaviour pkg_descr
+               then [ (installedPackageId pkg, packageId pkg)
+                    | pkg <- selectSubset bi externalPkgDeps ]
+                 ++ [ (inplacePackageId pkgid, pkgid)
+                    | pkgid <- selectSubset bi internalPkgDeps ]
+               else [ (installedPackageId pkg, packageId pkg)
+                    | pkg <- externalPkgDeps ]
 
     selectSubset :: Package pkg => BuildInfo -> [pkg] -> [pkg]
     selectSubset bi pkgs =
@@ -1030,7 +1048,7 @@ checkForeignDeps pkg lbi verbosity = do
         hcDefines comp =
           case compilerFlavor comp of
             GHC  ->
-                let ghcOS = case buildOS of
+                let ghcOS = case hostOS of
                             Linux     -> ["linux"]
                             Windows   -> ["mingw32"]
                             OSX       -> ["darwin"]
@@ -1042,8 +1060,9 @@ checkForeignDeps pkg lbi verbosity = do
                             HPUX      -> ["hpux"]
                             IRIX      -> ["irix"]
                             HaLVM     -> []
+                            IOS       -> ["ios"]
                             OtherOS _ -> []
-                    ghcArch = case buildArch of
+                    ghcArch = case hostArch of
                               I386        -> ["i386"]
                               X86_64      -> ["x86_64"]
                               PPC         -> ["powerpc"]
@@ -1068,6 +1087,7 @@ checkForeignDeps pkg lbi verbosity = do
             Hugs -> ["-D__HUGS__"]
             _    -> []
           where
+            Platform hostArch hostOS = hostPlatform lbi
             version = compilerVersion comp
                       -- TODO: move this into the compiler abstraction
             -- FIXME: this forces GHC's crazy 4.8.2 -> 408 convention on all

@@ -89,6 +89,7 @@ import Distribution.Simple.Configure
          ( checkPersistBuildConfigOutdated, configCompilerAux
          , interpretPackageDbFlags, maybeGetPersistBuildConfig )
 import qualified Distribution.Simple.LocalBuildInfo as LBI
+import Distribution.System ( Platform )
 import Distribution.Simple.Utils
          ( cabalVersion, die, notice, topHandler )
 import Distribution.Text
@@ -225,10 +226,10 @@ configureAction (configFlags, configExFlags) extraArgs globalFlags = do
   let configFlags'   = savedConfigureFlags   config `mappend` configFlags
       configExFlags' = savedConfigureExFlags config `mappend` configExFlags
       globalFlags'   = savedGlobalFlags      config `mappend` globalFlags
-  (comp, conf) <- configCompilerAux configFlags'
+  (comp, platform, conf) <- configCompilerAux configFlags'
   configure verbosity
             (configPackageDB' configFlags') (globalRepos globalFlags')
-            comp conf configFlags' configExFlags' extraArgs
+            comp platform conf configFlags' configExFlags' extraArgs
 
 buildAction :: BuildFlags -> [String] -> GlobalFlags -> IO ()
 buildAction buildFlags extraArgs globalFlags = do
@@ -344,7 +345,8 @@ reconfigure verbosity distPref    addConfigFlags
                     | otherwise -> case LBI.pkgDescrFile lbi of
                         Nothing -> return Nothing
                         Just pdFile -> do
-                            outdated <- checkPersistBuildConfigOutdated distPref pdFile
+                            outdated <- checkPersistBuildConfigOutdated
+                                        distPref pdFile
                             return $! if outdated
                                 then Just $! outdatedMessage pdFile
                                 else Nothing
@@ -395,10 +397,11 @@ installAction (configFlags, configExFlags, installFlags, haddockFlags)
       installFlags'  = defaultInstallFlags          `mappend`
                        savedInstallFlags     config `mappend` installFlags
       globalFlags'   = savedGlobalFlags      config `mappend` globalFlags
-  (comp, conf) <- configCompilerAux' configFlags'
+  (comp, platform, conf) <- configCompilerAux' configFlags'
   install verbosity
           (configPackageDB' configFlags') (globalRepos globalFlags')
-          comp conf globalFlags' configFlags' configExFlags' installFlags' haddockFlags
+          comp platform conf globalFlags' configFlags' configExFlags'
+          installFlags' haddockFlags
           targets
 
 testAction :: TestFlags -> [String] -> GlobalFlags -> IO ()
@@ -441,7 +444,7 @@ listAction listFlags extraArgs globalFlags = do
   config <- loadConfig verbosity (globalConfigFile globalFlags) mempty
   let configFlags  = savedConfigureFlags config
       globalFlags' = savedGlobalFlags    config `mappend` globalFlags
-  (comp, conf) <- configCompilerAux' configFlags
+  (comp, _, conf) <- configCompilerAux' configFlags
   list verbosity
        (configPackageDB' configFlags)
        (globalRepos globalFlags')
@@ -457,7 +460,7 @@ infoAction infoFlags extraArgs globalFlags = do
   config <- loadConfig verbosity (globalConfigFile globalFlags) mempty
   let configFlags  = savedConfigureFlags config
       globalFlags' = savedGlobalFlags    config `mappend` globalFlags
-  (comp, conf) <- configCompilerAux configFlags
+  (comp, _, conf) <- configCompilerAux configFlags
   info verbosity
        (configPackageDB' configFlags)
        (globalRepos globalFlags')
@@ -498,10 +501,10 @@ fetchAction fetchFlags extraArgs globalFlags = do
   config <- loadConfig verbosity (globalConfigFile globalFlags) mempty
   let configFlags  = savedConfigureFlags config
       globalFlags' = savedGlobalFlags config `mappend` globalFlags
-  (comp, conf) <- configCompilerAux' configFlags
+  (comp, platform, conf) <- configCompilerAux' configFlags
   fetch verbosity
         (configPackageDB' configFlags) (globalRepos globalFlags')
-        comp conf globalFlags' fetchFlags
+        comp platform conf globalFlags' fetchFlags
         targets
 
 uploadAction :: UploadFlags -> [String] -> GlobalFlags -> IO ()
@@ -600,7 +603,7 @@ initAction initFlags _extraArgs globalFlags = do
   let verbosity = fromFlag (initVerbosity initFlags)
   config <- loadConfig verbosity (globalConfigFile globalFlags) mempty
   let configFlags  = savedConfigureFlags config
-  (comp, conf) <- configCompilerAux' configFlags
+  (comp, _, conf) <- configCompilerAux' configFlags
   initCabal verbosity
             (configPackageDB' configFlags)
             comp
@@ -633,9 +636,9 @@ sandboxDeleteAction sandboxFlags extraArgs globalFlags = do
   sandboxDelete verbosity sandboxFlags globalFlags
 
 sandboxAddSourceAction :: SandboxFlags -> [String] -> GlobalFlags -> IO ()
-sandboxAddSourceAction sandboxFlags extraArgs _globalFlags = do
+sandboxAddSourceAction sandboxFlags extraArgs globalFlags = do
   let verbosity = fromFlag (sandboxVerbosity sandboxFlags)
-  sandboxAddSource verbosity sandboxFlags extraArgs
+  sandboxAddSource verbosity extraArgs sandboxFlags globalFlags
 
 sandboxConfigureAction :: (SandboxFlags, ConfigFlags, ConfigExFlags)
                           -> [String] -> GlobalFlags -> IO ()
@@ -647,9 +650,9 @@ sandboxConfigureAction (sandboxFlags, configFlags, configExFlags)
 
 sandboxBuildAction :: (SandboxFlags, BuildFlags) -> [String] -> GlobalFlags
                       -> IO ()
-sandboxBuildAction (sandboxFlags, buildFlags) extraArgs _globalFlags = do
+sandboxBuildAction (sandboxFlags, buildFlags) extraArgs globalFlags = do
   let verbosity = fromFlag (sandboxVerbosity sandboxFlags)
-  sandboxBuild verbosity sandboxFlags buildFlags extraArgs
+  sandboxBuild verbosity sandboxFlags buildFlags globalFlags extraArgs
 
 sandboxInstallAction :: (SandboxFlags, ConfigFlags, ConfigExFlags,
                          InstallFlags, HaddockFlags)
@@ -662,12 +665,12 @@ sandboxInstallAction
     installFlags haddockFlags extraArgs globalFlags mempty
 
 dumpPkgEnvAction :: SandboxFlags -> [String] -> GlobalFlags -> IO ()
-dumpPkgEnvAction sandboxFlags extraArgs _globalFlags = do
+dumpPkgEnvAction sandboxFlags extraArgs globalFlags = do
   when ((>0). length $ extraArgs) $
     die $ "the 'dump-pkgenv' command doesn't expect any arguments: "
       ++ unwords extraArgs
   let verbosity = fromFlag (sandboxVerbosity sandboxFlags)
-  dumpPackageEnvironment verbosity sandboxFlags
+  dumpPackageEnvironment verbosity sandboxFlags globalFlags
 
 -- | See 'Distribution.Client.Install.withWin32SelfUpgrade' for details.
 --
@@ -689,7 +692,7 @@ configPackageDB' cfg =
     userInstall = fromFlagOrDefault True (configUserInstall cfg)
 
 configCompilerAux' :: ConfigFlags
-                   -> IO (Compiler, ProgramConfiguration)
+                   -> IO (Compiler, Platform, ProgramConfiguration)
 configCompilerAux' configFlags =
   configCompilerAux configFlags
     --FIXME: make configCompilerAux use a sensible verbosity

@@ -77,7 +77,7 @@ import Distribution.TestSuite
     , Test(..) )
 import Distribution.Text
 import Distribution.Verbosity ( normal, Verbosity )
-import Distribution.System ( buildPlatform, Platform )
+import Distribution.System ( Platform )
 
 import Control.Exception ( bracket )
 import Control.Monad ( when, unless, filterM )
@@ -107,7 +107,7 @@ localPackageLog :: PD.PackageDescription -> LBI.LocalBuildInfo -> PackageLog
 localPackageLog pkg_descr lbi = PackageLog
     { package = PD.package pkg_descr
     , compiler = compilerId $ LBI.compiler lbi
-    , platform = buildPlatform
+    , platform = LBI.hostPlatform lbi
     , testSuites = []
     }
 
@@ -430,6 +430,7 @@ testSuiteLogPath template pkg_descr lbi testLog =
     where
         env = initialPathTemplateEnv
                 (PD.package pkg_descr) (compilerId $ LBI.compiler lbi)
+                (LBI.hostPlatform lbi)
                 ++  [ (TestSuiteNameVar, toPathTemplate $ testSuiteName testLog)
                     , (TestSuiteResultVar, result)
                     ]
@@ -446,7 +447,8 @@ testOption pkg_descr lbi suite template =
     fromPathTemplate $ substPathTemplate env template
   where
     env = initialPathTemplateEnv
-          (PD.package pkg_descr) (compilerId $ LBI.compiler lbi) ++
+          (PD.package pkg_descr) (compilerId $ LBI.compiler lbi)
+          (LBI.hostPlatform lbi) ++
           [(TestSuiteNameVar, toPathTemplate $ PD.testName suite)]
 
 packageLogPath :: PathTemplate
@@ -458,6 +460,7 @@ packageLogPath template pkg_descr lbi =
     where
         env = initialPathTemplateEnv
                 (PD.package pkg_descr) (compilerId $ LBI.compiler lbi)
+                (LBI.hostPlatform lbi)
 
 -- | The filename of the source file for the stub executable associated with a
 -- library 'TestSuite'.
@@ -539,4 +542,3 @@ stubWriteLog f n logs = do
     when (suiteError testLog) $ exitWith $ ExitFailure 2
     when (suiteFailed testLog) $ exitWith $ ExitFailure 1
     exitWith ExitSuccess
-
