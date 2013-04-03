@@ -96,7 +96,7 @@ mkRequest uri = HTTPC.def
   , HTTPC.port = port
   , HTTPC.secure = secure
   , HTTPC.requestHeaders = [(HTTP.hUserAgent, B8.pack userAgent)]
-  , HTTPC.checkStatus = \_ _ -> Nothing
+  , HTTPC.checkStatus = \_ _ _ -> Nothing
   }
 
   where

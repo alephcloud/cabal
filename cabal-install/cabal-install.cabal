@@ -129,12 +129,11 @@ Library
                    -- related to HTTPS and http-conduit
                    -- (in Distribution.Client.HttpUtils)
                    http-types >= 0.7,
-                   http-conduit >= 1.8.7.1,
+                   http-conduit >= 1.9.2.2,
                    transformers >= 0.3.0.0,
                    case-insensitive >= 0.4.0.3,
                    tls >= 1.0.2,
                    data-default >= 0.5.0
-
 
     if flag(old-base)
       build-depends: base < 3
