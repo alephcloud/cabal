@@ -62,22 +62,24 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE. -}
 
 module Distribution.Simple.GHC (
         getGhcInfo,
-        configure, getInstalledPackages,
+        configure, getInstalledPackages, getPackageDBContents,
         buildLib, buildExe,
         installLib, installExe,
         libAbiHash,
         initPackageDB,
+        invokeHcPkg,
         registerPackage,
         componentGhcOptions,
         ghcLibDir,
-        ghcDynamicByDefault,
+        ghcDynamic,
  ) where
 
 import qualified Distribution.Simple.GHC.IPI641 as IPI641
 import qualified Distribution.Simple.GHC.IPI642 as IPI642
 import Distribution.PackageDescription as PD
          ( PackageDescription(..), BuildInfo(..), Executable(..)
-         , Library(..), libModules, exeModules, hcOptions, usedExtensions, allExtensions )
+         , Library(..), libModules, exeModules, hcOptions
+         , usedExtensions, allExtensions )
 import Distribution.InstalledPackageInfo
          ( InstalledPackageInfo )
 import qualified Distribution.InstalledPackageInfo as InstalledPackageInfo
@@ -119,7 +121,8 @@ import Distribution.System
 import Distribution.Verbosity
 import Distribution.Text
          ( display, simpleParse )
-import Language.Haskell.Extension (Language(..), Extension(..), KnownExtension(..))
+import Language.Haskell.Extension (Language(..), Extension(..)
+                                  ,KnownExtension(..))
 
 import Control.Monad            ( unless, when, liftM )
 import Data.Char                ( isSpace )
@@ -130,7 +133,8 @@ import System.Directory
          ( removeFile, getDirectoryContents, doesFileExist
          , getTemporaryDirectory )
 import System.FilePath          ( (</>), (<.>), takeExtension,
-                                  takeDirectory, replaceExtension, splitExtension )
+                                  takeDirectory, replaceExtension,
+                                  splitExtension )
 import System.IO (hClose, hPutStrLn)
 import System.Environment (getEnv)
 import Distribution.Compat.Exception (catchExit, catchIO)
@@ -155,7 +159,8 @@ getGhcInfo verbosity ghcProg =
 -- Configuring
 
 configure :: Verbosity -> Maybe FilePath -> Maybe FilePath
-          -> ProgramConfiguration -> IO (Compiler, Maybe Platform, ProgramConfiguration)
+          -> ProgramConfiguration
+          -> IO (Compiler, Maybe Platform, ProgramConfiguration)
 configure verbosity hcPath hcPkgPath conf0 = do
 
   (ghcProg, ghcVersion, conf1) <-
@@ -215,22 +220,26 @@ guessToolFromGhcPath tool ghcProg verbosity
            dir               = takeDirectory path
            versionSuffix     = takeVersionSuffix (dropExeExtension path)
            guessNormal       = dir </> tool <.> exeExtension
-           guessGhcVersioned = dir </> (tool ++ "-ghc" ++ versionSuffix) <.> exeExtension
+           guessGhcVersioned = dir </> (tool ++ "-ghc" ++ versionSuffix)
+                               <.> exeExtension
            guessVersioned    = dir </> (tool ++ versionSuffix) <.> exeExtension
            guesses | null versionSuffix = [guessNormal]
                    | otherwise          = [guessGhcVersioned,
                                            guessVersioned,
                                            guessNormal]
-       info verbosity $ "looking for tool " ++ show tool ++ " near compiler in " ++ dir
+       info verbosity $ "looking for tool " ++ show tool
+         ++ " near compiler in " ++ dir
        exists <- mapM doesFileExist guesses
        case [ file | (file, True) <- zip guesses exists ] of
-                   -- If we can't find it near ghc, fall back to the usual method.
+                   -- If we can't find it near ghc, fall back to the usual
+                   -- method.
          []     -> findProgramLocation verbosity tool
          (fp:_) -> do info verbosity $ "found " ++ tool ++ " in " ++ fp
                       return (Just fp)
 
   where takeVersionSuffix :: FilePath -> String
-        takeVersionSuffix = reverse . takeWhile (`elem ` "0123456789.-") . reverse
+        takeVersionSuffix = reverse . takeWhile (`elem ` "0123456789.-") .
+                            reverse
 
         dropExeExtension :: FilePath -> FilePath
         dropExeExtension filepath =
@@ -309,7 +318,8 @@ configureToolchain ghcProg ghcInfo =
       | otherwise = programFindLocation prog
       where
         look [] verbosity = do
-          warn verbosity ("Couldn't find " ++ programName prog ++ " where I expected it. Trying the search path.")
+          warn verbosity ("Couldn't find " ++ programName prog
+                          ++ " where I expected it. Trying the search path.")
           programFindLocation prog verbosity
         look (f:fs) verbosity = do
           exists <- doesFileExist f
@@ -478,24 +488,24 @@ oldLanguageExtensions =
     ,(DeriveDataTypeable         , fglasgowExts)
     ,(ConstrainedClassMethods    , fglasgowExts)
     ]
+-- | Given a single package DB, return all installed packages.
+getPackageDBContents :: Verbosity -> PackageDB -> ProgramConfiguration
+                        -> IO PackageIndex
+getPackageDBContents verbosity packagedb conf = do
+  pkgss <- getInstalledPackages' verbosity [packagedb] conf
+  toPackageIndex verbosity pkgss conf
 
+-- | Given a package DB stack, return all installed packages.
 getInstalledPackages :: Verbosity -> PackageDBStack -> ProgramConfiguration
                      -> IO PackageIndex
 getInstalledPackages verbosity packagedbs conf = do
   checkPackageDbEnvVar
   checkPackageDbStack packagedbs
   pkgss <- getInstalledPackages' verbosity packagedbs conf
-  topDir <- ghcLibDir' verbosity ghcProg
-  let indexes = [ PackageIndex.fromList (map (substTopDir topDir) pkgs)
-                | (_, pkgs) <- pkgss ]
-  return $! hackRtsPackage (mconcat indexes)
+  index <- toPackageIndex verbosity pkgss conf
+  return $! hackRtsPackage index
 
   where
-    -- On Windows, various fields have $topdir/foo rather than full
-    -- paths. We need to substitute the right value in so that when
-    -- we, for example, call gcc, we have proper paths to give it
-    Just ghcProg = lookupProgram ghcProgram conf
-
     hackRtsPackage index =
       case PackageIndex.lookupPackageName index (PackageName "rts") of
         [(_,[rts])]
@@ -503,10 +513,30 @@ getInstalledPackages verbosity packagedbs conf = do
         _  -> index -- No (or multiple) ghc rts package is registered!!
                     -- Feh, whatever, the ghc testsuite does some crazy stuff.
 
+-- | Given a list of @(PackageDB, InstalledPackageInfo)@ pairs, produce a
+-- @PackageIndex@. Helper function used by 'getPackageDBContents' and
+-- 'getInstalledPackages'.
+toPackageIndex :: Verbosity
+               -> [(PackageDB, [InstalledPackageInfo])]
+               -> ProgramConfiguration
+               -> IO PackageIndex
+toPackageIndex verbosity pkgss conf = do
+  -- On Windows, various fields have $topdir/foo rather than full
+  -- paths. We need to substitute the right value in so that when
+  -- we, for example, call gcc, we have proper paths to give it.
+  topDir <- ghcLibDir' verbosity ghcProg
+  let indices = [ PackageIndex.fromList (map (substTopDir topDir) pkgs)
+                | (_, pkgs) <- pkgss ]
+  return $! (mconcat indices)
+
+  where
+    Just ghcProg = lookupProgram ghcProgram conf
+
 ghcLibDir :: Verbosity -> LocalBuildInfo -> IO FilePath
 ghcLibDir verbosity lbi =
     (reverse . dropWhile isSpace . reverse) `fmap`
-     rawSystemProgramStdoutConf verbosity ghcProgram (withPrograms lbi) ["--print-libdir"]
+     rawSystemProgramStdoutConf verbosity ghcProgram
+     (withPrograms lbi) ["--print-libdir"]
 
 ghcLibDir' :: Verbosity -> ConfiguredProgram -> IO FilePath
 ghcLibDir' verbosity ghcProg =
@@ -628,10 +658,10 @@ buildLib verbosity pkg_descr lbi lib clbi = do
 
   let pref = buildDir lbi
       pkgid = packageId pkg_descr
-      ifVanillaLib forceVanilla = when (forceVanilla || withVanillaLib lbi)
-      ifProfLib = when (withProfLib lbi)
-      ifSharedLib forceShared = when (forceShared || withSharedLib lbi)
-      ifGHCiLib = when (withGHCiLib lbi && withVanillaLib lbi)
+      whenVanillaLib forceVanilla = when (forceVanilla || withVanillaLib lbi)
+      whenProfLib = when (withProfLib lbi)
+      whenSharedLib forceShared = when (forceShared || withSharedLib lbi)
+      whenGHCiLib = when (withGHCiLib lbi && withVanillaLib lbi)
       comp = compiler lbi
       ghcVersion = compilerVersion comp
 
@@ -642,6 +672,7 @@ buildLib verbosity pkg_descr lbi lib clbi = do
              comp (withProfLib lbi) (libBuildInfo lib)
 
   isGhcDynamic <- ghcDynamic verbosity ghcProg
+  dynamicTooSupported <- ghcSupportsDynamicToo verbosity ghcProg
   let libTargetDir = pref
       doingTH = EnableExtension TemplateHaskell `elem` allExtensions libBi
       forceVanillaLib = doingTH && not isGhcDynamic
@@ -649,7 +680,8 @@ buildLib verbosity pkg_descr lbi lib clbi = do
       -- TH always needs default libs, even when building for profiling
 
   createDirectoryIfMissingVerbose verbosity True libTargetDir
-  -- TODO: do we need to put hs-boot files into place for mutually recurive modules?
+  -- TODO: do we need to put hs-boot files into place for mutually recursive
+  -- modules?
   let baseOpts    = componentGhcOptions verbosity lbi libBi clbi libTargetDir
       vanillaOpts = baseOpts `mappend` mempty {
                       ghcOptMode         = toFlag GhcModeMake,
@@ -672,20 +704,33 @@ buildLib verbosity pkg_descr lbi lib clbi = do
                       ghcOptExtra     = ghcSharedOptions libBi
                     }
 
+      vanillaSharedOpts = vanillaOpts `mappend` mempty {
+                              ghcOptExtra = ["-dynamic-too",
+                                             "-dynhisuf", "dyn_hi",
+                                             "-dynosuf", "dyn_o"]
+                          }
+
   unless (null (libModules lib)) $
-    do let vanilla = ifVanillaLib forceVanillaLib (runGhcProg vanillaOpts)
-           shared  = ifSharedLib  forceSharedLib  (runGhcProg sharedOpts)
-       if isGhcDynamic then do shared;  vanilla
-                     else do vanilla; shared
-       ifProfLib (runGhcProg profOpts)
+    do let vanilla = whenVanillaLib forceVanillaLib (runGhcProg vanillaOpts)
+           shared  = whenSharedLib  forceSharedLib  (runGhcProg sharedOpts)
+       if dynamicTooSupported &&
+          (forceVanillaLib || withVanillaLib lbi) &&
+          (forceSharedLib  || withSharedLib  lbi)  &&
+          null (ghcSharedOptions libBi)
+           then runGhcProg vanillaSharedOpts
+           else if isGhcDynamic then do shared;  vanilla
+                                else do vanilla; shared
+       whenProfLib (runGhcProg profOpts)
 
   -- build any C sources
   unless (null (cSources libBi)) $ do
      info verbosity "Building C Sources..."
      sequence_
        [ do let vanillaCcOpts = (componentCcGhcOptions verbosity lbi
-                                    libBi clbi pref filename) `mappend` mempty {
-                                  ghcOptProfilingMode = toFlag (withProfLib lbi)
+                                    libBi clbi pref filename)
+                profCcOpts    = vanillaCcOpts `mappend` mempty {
+                                  ghcOptProfilingMode = toFlag True,
+                                  ghcOptObjSuffix     = toFlag "p_o"
                                 }
                 sharedCcOpts  = vanillaCcOpts `mappend` mempty {
                                   ghcOptFPic      = toFlag True,
@@ -695,13 +740,17 @@ buildLib verbosity pkg_descr lbi lib clbi = do
                 odir          = fromFlag (ghcOptObjDir vanillaCcOpts)
             createDirectoryIfMissingVerbose verbosity True odir
             runGhcProg vanillaCcOpts
-            ifSharedLib forceSharedLib (runGhcProg sharedCcOpts)
+            whenSharedLib forceSharedLib (runGhcProg sharedCcOpts)
+            whenProfLib (runGhcProg profCcOpts)
        | filename <- cSources libBi]
 
   -- link:
   info verbosity "Linking..."
-  let cObjs = map (`replaceExtension` objExtension) (cSources libBi)
-      cSharedObjs = map (`replaceExtension` ("dyn_" ++ objExtension)) (cSources libBi)
+  let cObjs       = map (`replaceExtension` objExtension) (cSources libBi)
+      cProfObjs   = map (`replaceExtension` ("p_" ++ objExtension))
+                    (cSources libBi)
+      cSharedObjs = map (`replaceExtension` ("dyn_" ++ objExtension))
+                    (cSources libBi)
       cid = compilerId (compiler lbi)
       vanillaLibFilePath = libTargetDir </> mkLibName           libName
       profileLibFilePath = libTargetDir </> mkProfLibName       libName
@@ -752,7 +801,7 @@ buildLib verbosity pkg_descr lbi lib clbi = do
             ++ stubObjs
         profObjectFiles =
                hProfObjs
-            ++ map (pref </>) cObjs
+            ++ map (pref </>) cProfObjs
             ++ stubProfObjs
         ghciObjFiles =
                hObjs
@@ -784,22 +833,22 @@ buildLib verbosity pkg_descr lbi lib clbi = do
               ghcOptLinkLibPath        = extraLibDirs libBi
             }
 
-    ifVanillaLib False $ do
+    whenVanillaLib False $ do
       (arProg, _) <- requireProgram verbosity arProgram (withPrograms lbi)
       Ar.createArLibArchive verbosity arProg
         vanillaLibFilePath staticObjectFiles
 
-    ifProfLib $ do
+    whenProfLib $ do
       (arProg, _) <- requireProgram verbosity arProgram (withPrograms lbi)
       Ar.createArLibArchive verbosity arProg
         profileLibFilePath profObjectFiles
 
-    ifGHCiLib $ do
+    whenGHCiLib $ do
       (ldProg, _) <- requireProgram verbosity ldProgram (withPrograms lbi)
       Ld.combineObjectFiles verbosity ldProg
         ghciLibFilePath ghciObjFiles
 
-    ifSharedLib False $
+    whenSharedLib False $
       runGhcProg ghcSharedLinkArgs
 
 
@@ -827,8 +876,8 @@ buildExe verbosity _pkg_descr lbi
   let exeDir    = targetDir </> (exeName' ++ "-tmp")
   createDirectoryIfMissingVerbose verbosity True targetDir
   createDirectoryIfMissingVerbose verbosity True exeDir
-  -- TODO: do we need to put hs-boot files into place for mutually recursive modules?
-  -- FIX: what about exeName.hi-boot?
+  -- TODO: do we need to put hs-boot files into place for mutually recursive
+  -- modules?  FIX: what about exeName.hi-boot?
 
   -- build executables
 
@@ -1054,7 +1103,8 @@ installExe :: Verbosity
            -> PackageDescription
            -> Executable
            -> IO ()
-installExe verbosity lbi installDirs buildPref (progprefix, progsuffix) _pkg exe = do
+installExe verbosity lbi installDirs buildPref
+  (progprefix, progsuffix) _pkg exe = do
   let binDir = bindir installDirs
   createDirectoryIfMissingVerbose verbosity True binDir
   let exeFileName = exeName exe <.> exeExtension
@@ -1103,21 +1153,21 @@ installLib verbosity lbi targetDir dynlibTargetDir builtDir _pkg lib clbi = do
       copyModuleFiles ext =
         findModuleFiles [builtDir] [ext] (libModules lib)
           >>= installOrdinaryFiles verbosity targetDir
-  ifVanilla $ copyModuleFiles "hi"
-  ifProf    $ copyModuleFiles "p_hi"
-  ifShared  $ copyModuleFiles "dyn_hi"
+  whenVanilla $ copyModuleFiles "hi"
+  whenProf    $ copyModuleFiles "p_hi"
+  whenShared  $ copyModuleFiles "dyn_hi"
 
   -- copy the built library files over:
-  ifVanilla $ mapM_ (copy builtDir targetDir)             vanillaLibNames
-  ifProf    $ mapM_ (copy builtDir targetDir)             profileLibNames
-  ifGHCi    $ mapM_ (copy builtDir targetDir)             ghciLibNames
-  ifShared  $ mapM_ (copyShared builtDir dynlibTargetDir) sharedLibNames
+  whenVanilla $ mapM_ (copy builtDir targetDir)             vanillaLibNames
+  whenProf    $ mapM_ (copy builtDir targetDir)             profileLibNames
+  whenGHCi    $ mapM_ (copy builtDir targetDir)             ghciLibNames
+  whenShared  $ mapM_ (copyShared builtDir dynlibTargetDir) sharedLibNames
 
   -- run ranlib if necessary:
-  ifVanilla $ mapM_ (updateLibArchive verbosity lbi . (targetDir </>))
-                    vanillaLibNames
-  ifProf    $ mapM_ (updateLibArchive verbosity lbi . (targetDir </>))
-                    profileLibNames
+  whenVanilla $ mapM_ (updateLibArchive verbosity lbi . (targetDir </>))
+                      vanillaLibNames
+  whenProf    $ mapM_ (updateLibArchive verbosity lbi . (targetDir </>))
+                      profileLibNames
 
   where
     cid = compilerId (compiler lbi)
@@ -1129,10 +1179,10 @@ installLib verbosity lbi targetDir dynlibTargetDir builtDir _pkg lib clbi = do
 
     hasLib    = not $ null (libModules lib)
                    && null (cSources (libBuildInfo lib))
-    ifVanilla = when (hasLib && withVanillaLib lbi)
-    ifProf    = when (hasLib && withProfLib    lbi)
-    ifGHCi    = when (hasLib && withGHCiLib    lbi)
-    ifShared  = when (hasLib && withSharedLib  lbi)
+    whenVanilla = when (hasLib && withVanillaLib lbi)
+    whenProf    = when (hasLib && withProfLib    lbi)
+    whenGHCi    = when (hasLib && withGHCiLib    lbi)
+    whenShared  = when (hasLib && withSharedLib  lbi)
 
 -- | On MacOS X we have to call @ranlib@ to regenerate the archive index after
 -- copying. This is because the silly MacOS X linker checks that the archive
@@ -1152,6 +1202,15 @@ updateLibArchive verbosity lbi path
 -- | Create an empty package DB at the specified location.
 initPackageDB :: Verbosity -> ProgramConfiguration -> FilePath -> IO ()
 initPackageDB verbosity conf dbPath = HcPkg.init verbosity ghcPkgProg dbPath
+  where
+    Just ghcPkgProg = lookupProgram ghcPkgProgram conf
+
+-- | Run 'ghc-pkg' using a given package DB stack, directly forwarding the
+-- provided command-line arguments to it.
+invokeHcPkg :: Verbosity -> ProgramConfiguration -> PackageDBStack -> [String]
+               -> IO ()
+invokeHcPkg verbosity conf dbStack extraArgs =
+    HcPkg.invoke verbosity ghcPkgProg dbStack extraArgs
   where
     Just ghcPkgProg = lookupProgram ghcPkgProgram conf
 
@@ -1177,9 +1236,9 @@ ghcDynamic verbosity ghcProg
                   Just "YES" -> True
                   _          -> False
 
-ghcDynamicByDefault :: Verbosity -> ConfiguredProgram -> IO Bool
-ghcDynamicByDefault verbosity ghcProg
+ghcSupportsDynamicToo :: Verbosity -> ConfiguredProgram -> IO Bool
+ghcSupportsDynamicToo verbosity ghcProg
     = do xs <- getGhcInfo verbosity ghcProg
-         return $ case lookup "Dynamic by default" xs of
+         return $ case lookup "Support dynamic-too" xs of
                   Just "YES" -> True
                   _          -> False

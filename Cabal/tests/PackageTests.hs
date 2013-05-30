@@ -9,7 +9,8 @@ module Main where
 import Data.Version (Version(Version))
 import Distribution.Simple.Utils (cabalVersion)
 import Distribution.Text (display)
-import System.Directory (setCurrentDirectory)
+import System.Directory (getCurrentDirectory, setCurrentDirectory)
+import System.FilePath ((</>))
 import Test.Framework (Test, TestName, defaultMain, testGroup)
 import Test.Framework.Providers.HUnit (hUnitTestToTests)
 import qualified Test.HUnit as HUnit
@@ -28,7 +29,8 @@ import PackageTests.BuildDeps.SameDepsAllRound.Check
 import PackageTests.BuildDeps.TargetSpecificDeps1.Check
 import PackageTests.BuildDeps.TargetSpecificDeps2.Check
 import PackageTests.BuildDeps.TargetSpecificDeps3.Check
-import PackageTests.PackageTester (compileSetup)
+import PackageTests.BuildTestSuiteDetailedV09.Check
+import PackageTests.PackageTester (PackageSpec(..), compileSetup)
 import PackageTests.PathsModule.Executable.Check
 import PackageTests.PathsModule.Library.Check
 import PackageTests.PreProcess.Check
@@ -38,12 +40,13 @@ import PackageTests.EmptyLib.Check
 import PackageTests.TestOptions.Check
 import PackageTests.TestStanza.Check
 import PackageTests.TestSuiteExeV10.Check
+import PackageTests.OrderFlags.Check
 
 hunit :: TestName -> HUnit.Test -> Test
 hunit name test = testGroup name $ hUnitTestToTests test
 
-tests :: Version -> [Test]
-tests version =
+tests :: Version -> PackageSpec -> [Test]
+tests version inplaceSpec =
     [ hunit "BuildDeps/SameDepsAllRound"
       PackageTests.BuildDeps.SameDepsAllRound.Check.suite
       -- The two following tests were disabled by Johan Tibell as
@@ -77,6 +80,10 @@ tests version =
     , hunit "PathsModule/Library" PackageTests.PathsModule.Library.Check.suite
     , hunit "EmptyLib/emptyLib"
       PackageTests.EmptyLib.Check.emptyLib
+    , hunit "BuildTestSuiteDetailedV09"
+      $ PackageTests.BuildTestSuiteDetailedV09.Check.suite inplaceSpec
+    , hunit "OrderFlags"
+      PackageTests.OrderFlags.Check.suite
     ] ++
     -- These tests are only required to pass on cabal version >= 1.7
     (if version >= Version [1, 7] []
@@ -101,9 +108,17 @@ tests version =
 
 main :: IO ()
 main = do
+    wd <- getCurrentDirectory
+    let dbFile = wd </> "dist/package.conf.inplace"
+        inplaceSpec = PackageSpec
+            { directory = []
+            , configOpts = [ "--package-db=" ++ dbFile
+                           , "--constraint=Cabal == " ++ display cabalVersion
+                           ]
+            }
     putStrLn $ "Cabal test suite - testing cabal version " ++
         display cabalVersion
     setCurrentDirectory "tests"
     -- Create a shared Setup executable to speed up Simple tests
     compileSetup "."
-    defaultMain (tests cabalVersion)
+    defaultMain (tests cabalVersion inplaceSpec)

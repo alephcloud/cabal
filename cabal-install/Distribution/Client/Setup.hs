@@ -15,7 +15,8 @@ module Distribution.Client.Setup
     , configureCommand, ConfigFlags(..), filterConfigureFlags
     , configureExCommand, ConfigExFlags(..), defaultConfigExFlags
                         , configureExOptions
-    , buildCommand, BuildFlags(..)
+    , buildCommand, BuildFlags(..), BuildExFlags(..), SkipAddSourceDepsCheck(..)
+    , testCommand, benchmarkCommand
     , installCommand, InstallFlags(..), installOptions, defaultInstallFlags
     , listCommand, ListFlags(..)
     , updateCommand
@@ -30,11 +31,7 @@ module Distribution.Client.Setup
     , initCommand, IT.InitFlags(..)
     , sdistCommand, SDistFlags(..), SDistExFlags(..), ArchiveFormat(..)
     , win32SelfUpgradeCommand, Win32SelfUpgradeFlags(..)
-    , indexCommand, IndexFlags(..)
-    , dumpPkgEnvCommand
-    , sandboxInitCommand, sandboxDeleteCommand, sandboxConfigureCommand
-    , sandboxAddSourceCommand, sandboxBuildCommand, sandboxInstallCommand
-    , SandboxFlags(..), defaultSandboxLocation
+    , sandboxCommand, defaultSandboxLocation, SandboxFlags(..)
 
     , parsePackageArgs
     --TODO: stop exporting these:
@@ -58,7 +55,8 @@ import Distribution.Simple.Program
 import Distribution.Simple.Command hiding (boolOpt)
 import qualified Distribution.Simple.Setup as Cabal
 import Distribution.Simple.Setup
-         ( ConfigFlags(..), BuildFlags(..), SDistFlags(..), HaddockFlags(..)
+         ( ConfigFlags(..), BuildFlags(..), TestFlags(..), BenchmarkFlags(..)
+         , SDistFlags(..), HaddockFlags(..)
          , Flag(..), toFlag, fromFlag, flagToMaybe, flagToList
          , optionVerbosity, boolOpt, trueArg, falseArg )
 import Distribution.Simple.InstallDirs
@@ -321,10 +319,94 @@ instance Monoid ConfigExFlags where
 -- * Build flags
 -- ------------------------------------------------------------
 
-buildCommand :: CommandUI BuildFlags
-buildCommand = (Cabal.buildCommand defaultProgramConfiguration) {
-    commandDefaultFlags = mempty
+data SkipAddSourceDepsCheck =
+  SkipAddSourceDepsCheck | DontSkipAddSourceDepsCheck
+  deriving Eq
+
+data BuildExFlags = BuildExFlags {
+  buildNumJobs  :: Flag (Maybe Int),
+  buildOnly     :: Flag SkipAddSourceDepsCheck
+}
+
+buildExOptions :: ShowOrParseArgs -> [OptionField BuildExFlags]
+buildExOptions _showOrParseArgs =
+  option "j" ["jobs"]
+  "Run NUM jobs simultaneously (or '$ncpus' if no NUM is given)"
+  buildNumJobs (\v flags -> flags { buildNumJobs = v })
+  (optArg "NUM" (fmap Flag numJobsParser)
+   (Flag Nothing)
+   (map (Just . maybe "$ncpus" show) . flagToList))
+
+  : option [] ["only"]
+  "Don't reinstall add-source dependencies (sandbox-only)"
+  buildOnly (\v flags -> flags { buildOnly = v })
+  (noArg (Flag SkipAddSourceDepsCheck))
+
+  : []
+
+buildCommand :: CommandUI (BuildFlags, BuildExFlags)
+buildCommand = parent {
+    commandDefaultFlags = (commandDefaultFlags parent, mempty),
+    commandOptions      =
+      \showOrParseArgs -> liftOptions fst setFst
+                          (commandOptions parent showOrParseArgs)
+                          ++
+                          liftOptions snd setSnd (buildExOptions showOrParseArgs)
   }
+  where
+    setFst a (_,b) = (a,b)
+    setSnd b (a,_) = (a,b)
+
+    parent = Cabal.buildCommand defaultProgramConfiguration
+
+instance Monoid BuildExFlags where
+  mempty = BuildExFlags {
+    buildNumJobs = mempty,
+    buildOnly    = mempty
+  }
+  mappend a b = BuildExFlags {
+    buildNumJobs = combine buildNumJobs,
+    buildOnly    = combine buildOnly
+  }
+    where combine field = field a `mappend` field b
+
+-- ------------------------------------------------------------
+-- * Test command
+-- ------------------------------------------------------------
+
+testCommand :: CommandUI (TestFlags, BuildExFlags)
+testCommand = parent {
+  commandDefaultFlags = (commandDefaultFlags parent, mempty),
+  commandOptions      =
+    \showOrParseArgs -> liftOptions fst setFst
+                        (commandOptions parent showOrParseArgs)
+                        ++
+                        liftOptions snd setSnd (buildExOptions showOrParseArgs)
+  }
+  where
+    setFst a (_,b) = (a,b)
+    setSnd b (a,_) = (a,b)
+
+    parent = Cabal.testCommand
+
+-- ------------------------------------------------------------
+-- * Bench command
+-- ------------------------------------------------------------
+
+benchmarkCommand :: CommandUI (BenchmarkFlags, BuildExFlags)
+benchmarkCommand = parent {
+  commandDefaultFlags = (commandDefaultFlags parent, mempty),
+  commandOptions      =
+    \showOrParseArgs -> liftOptions fst setFst
+                        (commandOptions parent showOrParseArgs)
+                        ++
+                        liftOptions snd setSnd (buildExOptions showOrParseArgs)
+  }
+  where
+    setFst a (_,b) = (a,b)
+    setSnd b (a,_) = (a,b)
+
+    parent = Cabal.benchmarkCommand
 
 -- ------------------------------------------------------------
 -- * Fetch command
@@ -441,19 +523,27 @@ checkCommand = CommandUI {
     commandOptions      = \_ -> []
   }
 
-runCommand :: CommandUI BuildFlags
+runCommand :: CommandUI (BuildFlags, BuildExFlags)
 runCommand = CommandUI {
     commandName         = "run",
     commandSynopsis     = "Runs the compiled executable.",
     commandDescription  = Nothing,
     commandUsage        =
-      (\pname -> "Usage: " ++ pname
-                 ++ " run [FLAGS] [EXECUTABLE] [-- EXECUTABLE_FLAGS]\n\n"
-                 ++ "Flags for run:"),
+      \pname -> "Usage: " ++ pname
+                ++ " run [FLAGS] [EXECUTABLE] [-- EXECUTABLE_FLAGS]\n\n"
+                ++ "Flags for run:",
     commandDefaultFlags = mempty,
-    commandOptions      = Cabal.buildOptions progConf
+    commandOptions      =
+      \showOrParseArgs -> liftOptions fst setFst
+                          (Cabal.buildOptions progConf showOrParseArgs)
+                          ++
+                          liftOptions snd setSnd
+                          (buildExOptions showOrParseArgs)
   }
   where
+    setFst a (_,b) = (a,b)
+    setSnd b (a,_) = (a,b)
+
     progConf = defaultProgramConfiguration
 
 -- ------------------------------------------------------------
@@ -868,27 +958,17 @@ installOptions showOrParseArgs =
       , option "j" ["jobs"]
         "Run NUM jobs simultaneously (or '$ncpus' if no NUM is given)."
         installNumJobs (\v flags -> flags { installNumJobs = v })
-        (optArg "NUM" (fmap Flag flagToJobs)
+        (optArg "NUM" (fmap Flag numJobsParser)
                       (Flag Nothing)
                       (map (Just . maybe "$ncpus" show) . flagToList))
-      ] ++ case showOrParseArgs of      -- TODO: remove when "cabal install" avoids
+      ] ++ case showOrParseArgs of      -- TODO: remove when "cabal install"
+                                        -- avoids
           ParseArgs ->
             [ option [] ["only"]
               "Only installs the package in the current directory."
               installOnly (\v flags -> flags { installOnly = v })
               trueArg ]
           _ -> []
-  where
-    flagToJobs :: ReadE (Maybe Int)
-    flagToJobs = ReadE $ \s ->
-      case s of
-        "$ncpus" -> Right Nothing
-        _        -> case reads s of
-          [(n, "")]
-            | n < 1     -> Left "The number of jobs should be 1 or more."
-            | n > 64    -> Left "You probably don't want that many jobs."
-            | otherwise -> Right (Just n)
-          _             -> Left "The jobs value should be a number or '$ncpus'"
 
 
 instance Monoid InstallFlags where
@@ -1268,84 +1348,13 @@ instance Monoid Win32SelfUpgradeFlags where
     where combine field = field a `mappend` field b
 
 -- ------------------------------------------------------------
--- * Index flags
--- ------------------------------------------------------------
-
-data IndexFlags = IndexFlags {
-  indexInit         :: Flag Bool,
-  indexList         :: Flag Bool,
-  indexLinkSource   :: [FilePath],
-  indexRemoveSource :: [String],
-  indexVerbosity    :: Flag Verbosity
-}
-
-defaultIndexFlags :: IndexFlags
-defaultIndexFlags = IndexFlags {
-  indexInit         = mempty,
-  indexList         = mempty,
-  indexLinkSource   = [],
-  indexRemoveSource = [],
-  indexVerbosity    = toFlag normal
-}
-
-indexCommand :: CommandUI IndexFlags
-indexCommand = CommandUI {
-  commandName         = "index",
-  commandSynopsis     = "Query and modify the index file",
-  commandDescription  = Nothing,
-  commandUsage        = \pname ->
-    "Usage: " ++ pname ++ " index FLAGS PATH\n\n"
-     ++ "Flags for index:",
-  commandDefaultFlags = defaultIndexFlags,
-  commandOptions      = \_ ->
-      [optionVerbosity indexVerbosity
-       (\v flags -> flags { indexVerbosity = v})
-
-      ,option [] ["init"]
-       "Create the index"
-       indexInit (\v flags -> flags { indexInit = v })
-       trueArg
-
-      ,option [] ["link-source"]
-       "Add a reference to a local build tree to the index"
-       indexLinkSource (\v flags -> flags { indexLinkSource = v })
-       (reqArg' "PATH" (\x -> [x]) id)
-
-      ,option [] ["remove-source"]
-       "Remove a reference to a local build tree from the index"
-       indexRemoveSource (\v flags -> flags { indexRemoveSource = v })
-       (reqArg' "PATH" (\x -> [x]) id)
-
-      ,option [] ["list"]
-       "List the local build trees that are referred to from the index"
-       indexList (\v flags -> flags { indexList = v })
-       trueArg
-      ]
-}
-
-instance Monoid IndexFlags where
-  mempty = IndexFlags {
-    indexInit         = mempty,
-    indexList         = mempty,
-    indexLinkSource   = mempty,
-    indexRemoveSource = mempty,
-    indexVerbosity    = mempty
-  }
-  mappend a b = IndexFlags {
-    indexInit         = combine indexInit,
-    indexList         = combine indexList,
-    indexLinkSource   = combine indexLinkSource,
-    indexRemoveSource = combine indexRemoveSource,
-    indexVerbosity    = combine indexVerbosity
-  }
-    where combine field = field a `mappend` field b
-
--- ------------------------------------------------------------
 -- * Sandbox-related flags
 -- ------------------------------------------------------------
 
 data SandboxFlags = SandboxFlags {
   sandboxVerbosity :: Flag Verbosity,
+  sandboxSnapshot  :: Flag Bool, -- FIXME: this should be an 'add-source'-only
+                                 -- flag.
   sandboxLocation  :: Flag FilePath
 }
 
@@ -1355,132 +1364,68 @@ defaultSandboxLocation = ".cabal-sandbox"
 defaultSandboxFlags :: SandboxFlags
 defaultSandboxFlags = SandboxFlags {
   sandboxVerbosity = toFlag normal,
+  sandboxSnapshot  = toFlag False,
   sandboxLocation  = toFlag defaultSandboxLocation
   }
 
-commonSandboxOptions :: ShowOrParseArgs -> [OptionField SandboxFlags]
-commonSandboxOptions _showOrParseArgs =
-  [ optionVerbosity sandboxVerbosity (\v flags -> flags { sandboxVerbosity = v })
+sandboxCommand :: CommandUI SandboxFlags
+sandboxCommand = CommandUI {
+  commandName         = "sandbox",
+  commandSynopsis     = "Create/modify/delete a sandbox",
+  commandDescription  = Nothing,
+  commandUsage        = \pname ->
+       "Usage: " ++ pname ++ " sandbox init\n"
+    ++ "   or: " ++ pname ++ " sandbox delete\n"
+    ++ "   or: " ++ pname ++ " sandbox add-source  [PATHS]\n\n"
+    ++ "   or: " ++ pname ++ " sandbox hc-pkg      [ARGS]\n"
+    ++ "   or: " ++ pname ++ " sandbox list-sources\n\n"
+    ++ "Flags for sandbox:",
+
+  commandDefaultFlags = defaultSandboxFlags,
+  commandOptions      = \_ ->
+    [ optionVerbosity sandboxVerbosity
+      (\v flags -> flags { sandboxVerbosity = v })
+
+    , option [] ["snapshot"]
+      "Take a snapshot instead of creating a link (only applies to 'add-source')"
+      sandboxSnapshot (\v flags -> flags { sandboxSnapshot = v })
+      trueArg
 
     , option [] ["sandbox"]
       "Sandbox location (default: './.cabal-sandbox')."
       sandboxLocation (\v flags -> flags { sandboxLocation = v })
       (reqArgFlag "DIR")
-  ]
-
-sandboxInitCommand :: CommandUI SandboxFlags
-sandboxInitCommand = CommandUI {
-  commandName         = "sandbox-init",
-  commandSynopsis     = "Initialise a fresh sandbox",
-  commandDescription  = Nothing,
-  commandUsage        = usageFlags "sandbox-init",
-  commandDefaultFlags = defaultSandboxFlags,
-  commandOptions      = commonSandboxOptions
-  }
-
-sandboxDeleteCommand :: CommandUI SandboxFlags
-sandboxDeleteCommand = CommandUI {
-  commandName         = "sandbox-delete",
-  commandSynopsis     = "Deletes current sandbox",
-  commandDescription  = Nothing,
-  commandUsage        = usageFlags "sandbox-delete",
-  commandDefaultFlags = defaultSandboxFlags,
-  commandOptions      = commonSandboxOptions
-  }
-
-sandboxAddSourceCommand :: CommandUI SandboxFlags
-sandboxAddSourceCommand = CommandUI {
-  commandName         = "sandbox-add-source",
-  commandSynopsis     = "Make a source package available in a sandbox",
-  commandDescription  = Nothing,
-  commandUsage        = usageFlags "sandbox-add-source",
-  commandDefaultFlags = defaultSandboxFlags,
-  commandOptions      = commonSandboxOptions
-  }
-
-sandboxConfigureCommand :: CommandUI (SandboxFlags, ConfigFlags, ConfigExFlags)
-sandboxConfigureCommand = CommandUI {
-  commandName         = "sandbox-configure",
-  commandSynopsis     = "Configure a package inside a sandbox",
-  commandDescription  = Nothing,
-  commandUsage        = usageFlags "sandbox-configure",
-  commandDefaultFlags = (defaultSandboxFlags, mempty, defaultConfigExFlags),
-  commandOptions      = \showOrParseArgs ->
-    liftOptions get1 set1 (commonSandboxOptions showOrParseArgs)
-    ++ liftOptions get2 set2
-             (filter ((\n -> n /= "constraint" && n /= "verbose") . optionName) $
-              configureOptions showOrParseArgs)
-    ++ liftOptions get3 set3 (configureExOptions showOrParseArgs)
-
-  }
-  where
-    get1 (a,_,_) = a; set1 a (_,b,c) = (a,b,c)
-    get2 (_,b,_) = b; set2 b (a,_,c) = (a,b,c)
-    get3 (_,_,c) = c; set3 c (a,b,_) = (a,b,c)
-
-sandboxBuildCommand :: CommandUI (SandboxFlags, BuildFlags)
-sandboxBuildCommand = CommandUI {
-  commandName         = "sandbox-build",
-  commandSynopsis     = "Build a package inside a sandbox",
-  commandDescription  = Nothing,
-  commandUsage        = usageFlags "sandbox-build",
-  commandDefaultFlags = (defaultSandboxFlags, Cabal.defaultBuildFlags),
-  commandOptions      = \showOrParseArgs ->
-    liftOptions fst setFst (commonSandboxOptions showOrParseArgs)
-    ++ liftOptions snd setSnd (filter ((/= "verbose") . optionName) $
-                               Cabal.buildOptions progConf showOrParseArgs)
-  }
-  where
-    progConf = defaultProgramConfiguration
-
-    setFst a (_,b) = (a,b)
-    setSnd b (a,_) = (a,b)
-
-sandboxInstallCommand :: CommandUI (SandboxFlags, ConfigFlags, ConfigExFlags,
-                                    InstallFlags, HaddockFlags)
-sandboxInstallCommand = CommandUI {
-  commandName         = "sandbox-install",
-  commandSynopsis     = "Install a list of packages into a sandbox",
-  commandDescription  = commandDescription installCommand,
-  commandUsage        = usageFlagsOrPackages "sandbox-install",
-  commandDefaultFlags = (defaultSandboxFlags, mempty, mempty, mempty, mempty),
-  commandOptions      = \showOrParseArgs ->
-       liftOptions get1 set1 (commonSandboxOptions showOrParseArgs)
-    ++ liftOptions get2 set2
-       (filter ((\n -> n /= "constraint" && n /= "verbose") . optionName) $
-        configureOptions showOrParseArgs)
-    ++ liftOptions get3 set3 (configureExOptions showOrParseArgs)
-    ++ liftOptions get4 set4 (installOptions showOrParseArgs)
-    ++ liftOptions get5 set5 (haddockOptions showOrParseArgs)
-  }
-  where
-    get1 (a,_,_,_,_) = a; set1 a (_,b,c,d,e) = (a,b,c,d,e)
-    get2 (_,b,_,_,_) = b; set2 b (a,_,c,d,e) = (a,b,c,d,e)
-    get3 (_,_,c,_,_) = c; set3 c (a,b,_,d,e) = (a,b,c,d,e)
-    get4 (_,_,_,d,_) = d; set4 d (a,b,c,_,e) = (a,b,c,d,e)
-    get5 (_,_,_,_,e) = e; set5 e (a,b,c,d,_) = (a,b,c,d,e)
-
-dumpPkgEnvCommand :: CommandUI SandboxFlags
-dumpPkgEnvCommand = CommandUI {
-  commandName         = "dump-pkgenv",
-  commandSynopsis     = "Dump a parsed package environment file",
-  commandDescription  = Nothing,
-  commandUsage        = usageFlags "dump-pkgenv",
-  commandDefaultFlags = defaultSandboxFlags,
-  commandOptions      = commonSandboxOptions
+    ]
   }
 
 instance Monoid SandboxFlags where
   mempty = SandboxFlags {
     sandboxVerbosity = mempty,
+    sandboxSnapshot  = mempty,
     sandboxLocation  = mempty
     }
   mappend a b = SandboxFlags {
     sandboxVerbosity = combine sandboxVerbosity,
+    sandboxSnapshot  = combine sandboxSnapshot,
     sandboxLocation  = combine sandboxLocation
     }
     where combine field = field a `mappend` field b
 
+-- ------------------------------------------------------------
+-- * Shared options utils
+-- ------------------------------------------------------------
+
+-- | Common parser for the @-j@ flag of @build@ and @install@.
+numJobsParser :: ReadE (Maybe Int)
+numJobsParser = ReadE $ \s ->
+  case s of
+    "$ncpus" -> Right Nothing
+    _        -> case reads s of
+      [(n, "")]
+        | n < 1     -> Left "The number of jobs should be 1 or more."
+        | n > 64    -> Left "You probably don't want that many jobs."
+        | otherwise -> Right (Just n)
+      _             -> Left "The jobs value should be a number or '$ncpus'"
 
 -- ------------------------------------------------------------
 -- * GetOpt Utils

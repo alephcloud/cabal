@@ -40,6 +40,8 @@ module Distribution.Client.Tar (
   TypeCode,
   Format(..),
   buildTreeRefTypeCode,
+  buildTreeSnapshotTypeCode,
+  isBuildTreeRefTypeCode,
   entrySizeInBlocks,
   entrySizeInBytes,
 
@@ -115,7 +117,8 @@ extractTarGzFile :: FilePath -- ^ Destination directory
                  -> FilePath -- ^ Tarball
                 -> IO ()
 extractTarGzFile dir expected tar =
-  unpack dir . checkTarbomb expected . read . GZipUtils.maybeDecompress =<< BS.readFile tar
+  unpack dir . checkTarbomb expected . read
+  . GZipUtils.maybeDecompress =<< BS.readFile tar
 
 --
 -- * Entry type
@@ -157,6 +160,17 @@ data Entry = Entry {
 -- path.
 buildTreeRefTypeCode :: TypeCode
 buildTreeRefTypeCode = 'C'
+
+-- | Type code for the local build tree snapshot entry type.
+buildTreeSnapshotTypeCode :: TypeCode
+buildTreeSnapshotTypeCode = 'S'
+
+-- | Is this a type code for a build tree reference?
+isBuildTreeRefTypeCode :: TypeCode -> Bool
+isBuildTreeRefTypeCode typeCode
+  | (typeCode == buildTreeRefTypeCode
+     || typeCode == buildTreeSnapshotTypeCode) = True
+  | otherwise                                  = False
 
 -- | Native 'FilePath' of the file or directory within the archive.
 --
@@ -651,7 +665,8 @@ getChars :: Int64 -> Int64 -> ByteString -> String
 getChars off len = BS.Char8.unpack . getBytes off len
 
 getString :: Int64 -> Int64 -> ByteString -> String
-getString off len = BS.Char8.unpack . BS.Char8.takeWhile (/='\0') . getBytes off len
+getString off len = BS.Char8.unpack . BS.Char8.takeWhile (/='\0')
+                    . getBytes off len
 
 data Partial a = Error String | Ok a
 

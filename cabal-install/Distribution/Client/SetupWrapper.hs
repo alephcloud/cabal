@@ -68,7 +68,7 @@ import Distribution.Simple.Utils
          , createDirectoryIfMissingVerbose, installExecutableFile
          , rewriteFile, intercalate )
 import Distribution.Client.Utils
-         ( moreRecentFile, inDir )
+         ( moreRecentFile, inDir, tryCanonicalizePath )
 import Distribution.System ( Platform(..), buildPlatform )
 import Distribution.Text
          ( display )
@@ -77,7 +77,7 @@ import Distribution.Verbosity
 import Distribution.Compat.Exception
          ( catchIO )
 
-import System.Directory  ( doesFileExist, canonicalizePath )
+import System.Directory  ( doesFileExist )
 import System.FilePath   ( (</>), (<.>) )
 import System.IO         ( Handle, hPutStr )
 import System.Exit       ( ExitCode(..), exitWith )
@@ -102,6 +102,16 @@ data SetupScriptOptions = SetupScriptOptions {
 
     -- Used only when calling setupWrapper from parallel code to serialise
     -- access to the setup cache; should be Nothing otherwise.
+    --
+    -- Note: setup exe cache
+    ------------------------
+    -- When we are installing in parallel, we always use the external setup
+    -- method. Since compiling the setup script each time adds noticeable
+    -- overhead, we use a shared setup script cache
+    -- ('~/.cabal/setup-exe-cache'). For each (compiler, platform, Cabal
+    -- version) combination the cache holds a compiled setup script
+    -- executable. This only affects the Simple build type; for the Custom,
+    -- Configure and Make build types we always compile the setup script anew.
     setupCacheLock           :: Maybe Lock
   }
 
@@ -203,6 +213,8 @@ externalSetupMethod verbosity options pkg bt mkargs = do
   setupHs <- updateSetupScript cabalLibVersion bt
   debug verbosity $ "Using " ++ setupHs ++ " as setup script."
   path <- case bt of
+    -- TODO: Should we also cache the setup exe for the Make and Configure build
+    -- types?
     Simple -> getCachedSetupExecutable options' cabalLibVersion setupHs
     _      -> compileSetupExecutable options' cabalLibVersion setupHs False
   invokeSetupScript path (mkargs cabalLibVersion)
@@ -253,7 +265,8 @@ externalSetupMethod verbosity options pkg bt mkargs = do
     index <- maybeGetInstalledPackages options' comp conf
     let cabalDep = Dependency (PackageName "Cabal") (useCabalVersion options')
     case PackageIndex.lookupDependency index cabalDep of
-      []   -> die $ "The package requires Cabal library version "
+      []   -> die $ "The package '" ++ display (packageName pkg)
+                 ++ "' requires Cabal library version "
                  ++ display (useCabalVersion options)
                  ++ " but no suitable version is installed."
       pkgs -> return $ bestVersion id (map fst pkgs)
@@ -282,7 +295,8 @@ externalSetupMethod verbosity options pkg bt mkargs = do
     index <- maybeGetInstalledPackages options' compiler conf
     let cabalPkgid = PackageIdentifier (PackageName "Cabal") cabalLibVersion
     case PackageIndex.lookupSourcePackageId index cabalPkgid of
-      []           -> die $ "The package requires Cabal library version "
+      []           -> die $ "The package '" ++ display (packageName pkg)
+                      ++ "' requires Cabal library version "
                       ++ display (cabalLibVersion)
                       ++ " but no suitable version is installed."
       iPkgInfos   -> return . Just . installedPackageId
@@ -426,7 +440,7 @@ externalSetupMethod verbosity options pkg bt mkargs = do
     -- be turned into an absolute path. On some systems, runProcess will take
     -- path as relative to the new working directory instead of the current
     -- working directory.
-    path' <- canonicalizePath path
+    path' <- tryCanonicalizePath path
 
     process <- runProcess path' args
                  (useWorkingDir options) Nothing
