@@ -99,26 +99,28 @@ import Network.URI
 
 -- | Flags that apply at the top level, not to any sub-command.
 data GlobalFlags = GlobalFlags {
-    globalVersion        :: Flag Bool,
-    globalNumericVersion :: Flag Bool,
-    globalConfigFile     :: Flag FilePath,
-    globalRemoteRepos    :: [RemoteRepo],     -- ^ Available Hackage servers.
-    globalCacheDir       :: Flag FilePath,
-    globalLocalRepos     :: [FilePath],
-    globalLogsDir        :: Flag FilePath,
-    globalWorldFile      :: Flag FilePath
+    globalVersion           :: Flag Bool,
+    globalNumericVersion    :: Flag Bool,
+    globalConfigFile        :: Flag FilePath,
+    globalSandboxConfigFile :: Flag FilePath,
+    globalRemoteRepos       :: [RemoteRepo],     -- ^ Available Hackage servers.
+    globalCacheDir          :: Flag FilePath,
+    globalLocalRepos        :: [FilePath],
+    globalLogsDir           :: Flag FilePath,
+    globalWorldFile         :: Flag FilePath
   }
 
 defaultGlobalFlags :: GlobalFlags
 defaultGlobalFlags  = GlobalFlags {
-    globalVersion        = Flag False,
-    globalNumericVersion = Flag False,
-    globalConfigFile     = mempty,
-    globalRemoteRepos    = [],
-    globalCacheDir       = mempty,
-    globalLocalRepos     = mempty,
-    globalLogsDir        = mempty,
-    globalWorldFile      = mempty
+    globalVersion           = Flag False,
+    globalNumericVersion    = Flag False,
+    globalConfigFile        = mempty,
+    globalSandboxConfigFile = mempty,
+    globalRemoteRepos       = [],
+    globalCacheDir          = mempty,
+    globalLocalRepos        = mempty,
+    globalLogsDir           = mempty,
+    globalWorldFile         = mempty
   }
 
 globalCommand :: CommandUI GlobalFlags
@@ -138,7 +140,7 @@ globalCommand = CommandUI {
       ++ "  " ++ pname ++ " update\n",
     commandDefaultFlags = defaultGlobalFlags,
     commandOptions      = \showOrParseArgs ->
-      (case showOrParseArgs of ShowArgs -> take 3; ParseArgs -> id)
+      (case showOrParseArgs of ShowArgs -> take 4; ParseArgs -> id)
       [option ['V'] ["version"]
          "Print version information"
          globalVersion (\v flags -> flags { globalVersion = v })
@@ -152,6 +154,12 @@ globalCommand = CommandUI {
       ,option [] ["config-file"]
          "Set an alternate location for the config file"
          globalConfigFile (\v flags -> flags { globalConfigFile = v })
+         (reqArgFlag "FILE")
+
+      ,option [] ["sandbox-config-file"]
+         "Set an alternate location for the sandbox config file \
+         \(default: './cabal.sandbox.config')"
+         globalConfigFile (\v flags -> flags { globalSandboxConfigFile = v })
          (reqArgFlag "FILE")
 
       ,option [] ["remote-repo"]
@@ -183,24 +191,26 @@ globalCommand = CommandUI {
 
 instance Monoid GlobalFlags where
   mempty = GlobalFlags {
-    globalVersion        = mempty,
-    globalNumericVersion = mempty,
-    globalConfigFile     = mempty,
-    globalRemoteRepos    = mempty,
-    globalCacheDir       = mempty,
-    globalLocalRepos     = mempty,
-    globalLogsDir        = mempty,
-    globalWorldFile      = mempty
+    globalVersion           = mempty,
+    globalNumericVersion    = mempty,
+    globalConfigFile        = mempty,
+    globalSandboxConfigFile = mempty,
+    globalRemoteRepos       = mempty,
+    globalCacheDir          = mempty,
+    globalLocalRepos        = mempty,
+    globalLogsDir           = mempty,
+    globalWorldFile         = mempty
   }
   mappend a b = GlobalFlags {
-    globalVersion        = combine globalVersion,
-    globalNumericVersion = combine globalNumericVersion,
-    globalConfigFile     = combine globalConfigFile,
-    globalRemoteRepos    = combine globalRemoteRepos,
-    globalCacheDir       = combine globalCacheDir,
-    globalLocalRepos     = combine globalLocalRepos,
-    globalLogsDir        = combine globalLogsDir,
-    globalWorldFile      = combine globalWorldFile
+    globalVersion           = combine globalVersion,
+    globalNumericVersion    = combine globalNumericVersion,
+    globalConfigFile        = combine globalConfigFile,
+    globalSandboxConfigFile = combine globalConfigFile,
+    globalRemoteRepos       = combine globalRemoteRepos,
+    globalCacheDir          = combine globalCacheDir,
+    globalLocalRepos        = combine globalLocalRepos,
+    globalLogsDir           = combine globalLogsDir,
+    globalWorldFile         = combine globalWorldFile
   }
     where combine field = field a `mappend` field b
 
@@ -625,7 +635,11 @@ getCommand :: CommandUI GetFlags
 getCommand = CommandUI {
     commandName         = "get",
     commandSynopsis     = "Gets a package's source code.",
-    commandDescription  = Nothing,
+    commandDescription  = Just $ \_ ->
+          "Creates a local copy of a package's source code. By default it gets "
+       ++ "the source\ntarball and unpacks it in a local subdirectory. "
+       ++ "Alternatively, with -s it will\nget the code from the source "
+       ++ "repository specified by the package.\n",
     commandUsage        = usagePackages "get",
     commandDefaultFlags = mempty,
     commandOptions      = \_ -> [
@@ -637,7 +651,7 @@ getCommand = CommandUI {
          (reqArgFlag "PATH")
 
        ,option "s" ["source-repository"]
-         "Fork the package's source repository."
+         "Copy the package's source repository (ie git clone, darcs get, etc as appropriate)."
          getSourceRepository (\v flags -> flags { getSourceRepository = v })
         (optArg "[head|this|...]" (readP_to_E (const "invalid source-repository")
                                               (fmap (toFlag . Just) parse))

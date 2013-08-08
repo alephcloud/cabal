@@ -362,13 +362,13 @@ configureToolchain ghcProg ghcInfo =
     configureLd' :: Verbosity -> ConfiguredProgram -> IO [ProgArg]
     configureLd' verbosity ldProg = do
       tempDir <- getTemporaryDirectory
-      ldx <- withTempFile False tempDir ".c" $ \testcfile testchnd ->
-             withTempFile False tempDir ".o" $ \testofile testohnd -> do
-               hPutStrLn testchnd "int foo() {}"
+      ldx <- withTempFile tempDir ".c" $ \testcfile testchnd ->
+             withTempFile tempDir ".o" $ \testofile testohnd -> do
+               hPutStrLn testchnd "int foo() { return 0; }"
                hClose testchnd; hClose testohnd
                rawSystemProgram verbosity ghcProg ["-c", testcfile,
                                                    "-o", testofile]
-               withTempFile False tempDir ".o" $ \testofile' testohnd' ->
+               withTempFile tempDir ".o" $ \testofile' testohnd' ->
                  do
                    hClose testohnd'
                    _ <- rawSystemProgramStdout verbosity ldProg
@@ -713,10 +713,11 @@ buildLib verbosity pkg_descr lbi lib clbi = do
   unless (null (libModules lib)) $
     do let vanilla = whenVanillaLib forceVanillaLib (runGhcProg vanillaOpts)
            shared  = whenSharedLib  forceSharedLib  (runGhcProg sharedOpts)
-       if dynamicTooSupported &&
-          (forceVanillaLib || withVanillaLib lbi) &&
-          (forceSharedLib  || withSharedLib  lbi)  &&
-          null (ghcSharedOptions libBi)
+           useDynToo = dynamicTooSupported &&
+                       (forceVanillaLib || withVanillaLib lbi) &&
+                       (forceSharedLib  || withSharedLib  lbi) &&
+                       null (ghcSharedOptions libBi)
+       if useDynToo
            then runGhcProg vanillaSharedOpts
            else if isGhcDynamic then do shared;  vanilla
                                 else do vanilla; shared
@@ -881,17 +882,20 @@ buildExe verbosity _pkg_descr lbi
 
   -- build executables
 
-  srcMainFile <- findFile (exeDir : hsSourceDirs exeBi) modPath
+  srcMainFile         <- findFile (exeDir : hsSourceDirs exeBi) modPath
+  isGhcDynamic        <- ghcDynamic verbosity ghcProg
+  dynamicTooSupported <- ghcSupportsDynamicToo verbosity ghcProg
 
   let isHaskellMain = elem (takeExtension srcMainFile) [".hs", ".lhs"]
       cSrcs         = cSources exeBi ++ [srcMainFile | not isHaskellMain]
       cObjs         = map (`replaceExtension` objExtension) cSrcs
       baseOpts   = (componentGhcOptions verbosity lbi exeBi clbi exeDir)
                     `mappend` mempty {
-                      ghcOptMode           = toFlag GhcModeMake,
-                      ghcOptInputFiles     = [ srcMainFile  |     isHaskellMain],
-                      ghcOptInputModules   = [ m            | not isHaskellMain
-                                                            , m <- exeModules exe]
+                      ghcOptMode         = toFlag GhcModeMake,
+                      ghcOptInputFiles   =
+                        [ srcMainFile | isHaskellMain],
+                      ghcOptInputModules =
+                        [ m | not isHaskellMain, m <- exeModules exe]
                     }
       staticOpts = baseOpts `mappend` mempty {
                       ghcOptDynamic        = toFlag False
@@ -908,12 +912,37 @@ buildExe verbosity _pkg_descr lbi
                       ghcOptObjSuffix      = toFlag "dyn_o",
                       ghcOptExtra          = ghcSharedOptions exeBi
                     }
-
-      compileOpts | withProfExe lbi = profOpts
+      dynTooOpts = staticOpts `mappend` mempty {
+                      ghcOptExtra = ["-dynamic-too",
+                                     "-dynhisuf", "dyn_hi",
+                                     "-dynosuf", "dyn_o"]
+                    }
+      commonOpts  | withProfExe lbi = profOpts
                   | withDynExe  lbi = dynOpts
                   | otherwise       = staticOpts
+      compileOpts | useDynToo = dynTooOpts
+                  | otherwise = commonOpts
+      withStaticExe = (not $ withProfExe lbi) && (not $ withDynExe lbi)
 
-      linkOpts = compileOpts `mappend` mempty {
+      -- For building exe's that use TH with -prof or -dynamic we actually have
+      -- to build twice, once without -prof/-dynamic and then again with
+      -- -prof/-dynamic. This is because the code that TH needs to run at
+      -- compile time needs to be the vanilla ABI so it can be loaded up and run
+      -- by the compiler.
+      -- With dynamic-by-default GHC the TH object files loaded at compile-time
+      -- need to be .dyn_o instead of .o.
+      doingTH = EnableExtension TemplateHaskell `elem` allExtensions exeBi
+      -- Should we use -dynamic-too instead of compilng twice?
+      useDynToo = dynamicTooSupported && isGhcDynamic
+                  && doingTH && withStaticExe && null (ghcSharedOptions exeBi)
+      compileTHOpts | isGhcDynamic = dynOpts
+                    | otherwise    = staticOpts
+      compileForTH
+        | useDynToo    = False
+        | isGhcDynamic = doingTH && (withProfExe lbi || withStaticExe)
+        | otherwise    = doingTH && (withProfExe lbi || withDynExe lbi)
+
+      linkOpts = commonOpts `mappend` mempty {
                       ghcOptLinkOptions    = PD.ldOptions exeBi,
                       ghcOptLinkLibs       = extraLibs exeBi,
                       ghcOptLinkLibPath    = extraLibDirs exeBi,
@@ -922,15 +951,9 @@ buildExe verbosity _pkg_descr lbi
                       ghcOptExtra          = ["-no-hs-main" | not isHaskellMain ]
                  }
 
-  -- For building exe's for profiling that use TH we actually
-  -- have to build twice, once without profiling and the again
-  -- with profiling. This is because the code that TH needs to
-  -- run at compile time needs to be the vanilla ABI so it can
-  -- be loaded up and run by the compiler.
-  when ((withProfExe lbi || withDynExe lbi) &&
-        EnableExtension TemplateHaskell `elem` allExtensions exeBi) $
-    runGhcProg staticOpts { ghcOptNoLink = toFlag True }
-    --TODO: do we also need to play the static vs dynamic games here?
+  -- Build static/dynamic object files for TH, if needed.
+  when compileForTH $
+    runGhcProg compileTHOpts { ghcOptNoLink = toFlag True }
 
   runGhcProg compileOpts { ghcOptNoLink = toFlag True }
 
@@ -1074,7 +1097,8 @@ componentCcGhcOptions verbosity lbi bi clbi pref filename =
       ghcOptMode           = toFlag GhcModeCompile,
       ghcOptInputFiles     = [filename],
 
-      ghcOptCppIncludePath = odir : PD.includeDirs bi,
+      ghcOptCppIncludePath = [autogenModulesDir lbi, odir]
+                                   ++ PD.includeDirs bi,
       ghcOptPackageDBs     = withPackageDB lbi,
       ghcOptPackages       = componentPackageDeps clbi,
       ghcOptCcOptions      = PD.ccOptions bi

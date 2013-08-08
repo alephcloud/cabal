@@ -33,13 +33,12 @@ import qualified Data.Set as S
 import Data.Maybe
          ( isJust, fromMaybe, maybeToList )
 import Control.Exception as Exception
-         ( bracket, handleJust )
-import Control.Exception as Exception
-         ( Exception(toException), catches, Handler(Handler), IOException )
+         ( Exception(toException), bracket, catches, Handler(Handler), handleJust
+         , IOException, SomeException )
 import System.Exit
          ( ExitCode )
 import Distribution.Compat.Exception
-         ( SomeException, catchIO, catchExit )
+         ( catchIO, catchExit )
 import Control.Monad
          ( when, unless )
 import System.Directory
@@ -66,11 +65,12 @@ import Distribution.Client.Setup
          , ConfigFlags(..), configureCommand, filterConfigureFlags
          , ConfigExFlags(..), InstallFlags(..) )
 import Distribution.Client.Config
-         ( defaultCabalDir )
+         ( defaultCabalDir, defaultUserInstall )
 import Distribution.Client.Sandbox.Timestamp
          ( withUpdateTimestamps )
 import Distribution.Client.Sandbox.Types
-         ( SandboxPackageInfo(..), UseSandbox(..), isUseSandbox )
+         ( SandboxPackageInfo(..), UseSandbox(..), isUseSandbox
+         , whenUsingSandbox )
 import Distribution.Client.Tar (extractTarGzFile)
 import Distribution.Client.Types as Source
 import Distribution.Client.BuildReports.Types
@@ -173,7 +173,7 @@ install verbosity packageDBs repos comp platform conf useSandbox mSandboxPkgInfo
   userTargets0 = do
 
     installContext <- makeInstallContext verbosity args (Just userTargets0)
-    installPlan    <- foldProgress logMsg die return =<<
+    installPlan    <- foldProgress logMsg die' return =<<
                       makeInstallPlan verbosity args installContext
 
     processInstallPlan verbosity args installContext installPlan
@@ -183,6 +183,14 @@ install verbosity packageDBs repos comp platform conf useSandbox mSandboxPkgInfo
             globalFlags, configFlags, configExFlags, installFlags,
             haddockFlags)
 
+    die' message = die (message ++ if isUseSandbox useSandbox
+                                   then installFailedInSandbox else [])
+    -- TODO: use a better error message, remove duplication.
+    installFailedInSandbox =
+      "Note: when using a sandbox, all packages are required to have \
+      \consistent dependencies. \
+      \Try reinstalling/unregistering the offending packages or \
+      \recreating the sandbox."
     logMsg message rest = debugNoWrap verbosity message >> rest
 
 -- TODO: Make InstallContext a proper datatype with documented fields.
@@ -847,6 +855,12 @@ performInstallations verbosity
    globalFlags, configFlags, configExFlags, installFlags, haddockFlags)
   installedPkgIndex installPlan = do
 
+  -- With 'install -j' it can be a bit hard to tell whether a sandbox is used.
+  whenUsingSandbox useSandbox $ \sandboxDir ->
+    when parallelBuild $
+      notice verbosity $ "Notice: installing into a sandbox located at "
+                         ++ sandboxDir
+
   jobControl   <- if parallelBuild then newParallelJobControl
                                    else newSerialJobControl
   buildLimit   <- newJobLimit numJobs
@@ -1106,7 +1120,7 @@ installLocalTarballPackage
   -> IO BuildResult
 installLocalTarballPackage verbosity jobLimit pkgid tarballPath installPkg = do
   tmp <- getTemporaryDirectory
-  withTempDirectory verbosity False tmp (display pkgid) $ \tmpDirPath ->
+  withTempDirectory verbosity tmp (display pkgid) $ \tmpDirPath ->
     onFailure UnpackFailed $ do
       let relUnpackedPath = display pkgid
           absUnpackedPath = tmpDirPath </> relUnpackedPath
@@ -1155,6 +1169,15 @@ installUnpackedPackage verbosity buildLimit installLock numJobs
                     ++ " with the latest revision from the index."
       writeFileAtomic descFilePath pkgtxt
 
+  -- Make sure that we pass --libsubdir etc to 'setup configure' (necessary if
+  -- the setup script was compiled against an old version of the Cabal lib).
+  configFlags' <- addDefaultInstallDirs configFlags
+  -- Filter out flags not supported by the old versions of the Cabal lib.
+  let configureFlags :: Version -> ConfigFlags
+      configureFlags  = filterConfigureFlags configFlags' {
+        configVerbosity = toFlag verbosity'
+      }
+
   -- Configure phase
   onFailure ConfigureFailed $ withJobLimit buildLimit $ do
     when (numJobs > 1) $ notice verbosity $
@@ -1193,9 +1216,6 @@ installUnpackedPackage verbosity buildLimit installLock numJobs
 
   where
     pkgid            = packageId pkg
-    configureFlags   = filterConfigureFlags configFlags {
-      configVerbosity = toFlag verbosity'
-    }
     buildCommand'    = buildCommand defaultProgramConfiguration
     buildFlags   _   = emptyBuildFlags {
       buildDistPref  = configDistPref configFlags,
@@ -1215,6 +1235,21 @@ installUnpackedPackage verbosity buildLimit installLock numJobs
       Cabal.installVerbosity = toFlag verbosity'
     }
     verbosity' = maybe verbosity snd useLogFile
+
+    addDefaultInstallDirs :: ConfigFlags -> IO ConfigFlags
+    addDefaultInstallDirs configFlags' = do
+      defInstallDirs <- InstallDirs.defaultInstallDirs flavor userInstall False
+      return $ configFlags' {
+          configInstallDirs = fmap Cabal.Flag .
+                              InstallDirs.substituteInstallDirTemplates env $
+                              InstallDirs.combineInstallDirs fromFlagOrDefault
+                              defInstallDirs (configInstallDirs configFlags)
+          }
+        where
+          CompilerId flavor _ = compid
+          env         = initialPathTemplateEnv pkgid compid platform
+          userInstall = fromFlagOrDefault defaultUserInstall
+                        (configUserInstall configFlags')
 
     setup cmd flags  = do
       Exception.bracket

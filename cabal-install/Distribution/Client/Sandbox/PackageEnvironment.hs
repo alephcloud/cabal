@@ -13,8 +13,8 @@ module Distribution.Client.Sandbox.PackageEnvironment (
   , IncludeComments(..)
   , PackageEnvironmentType(..)
   , classifyPackageEnvironment
-  , createPackageEnvironment
-  , tryLoadSandboxPackageEnvironment
+  , createPackageEnvironmentFile
+  , tryLoadSandboxPackageEnvironmentFile
   , readPackageEnvironmentFile
   , showPackageEnvironment
   , showPackageEnvironmentWithComments
@@ -36,12 +36,13 @@ import Distribution.Client.Setup       ( GlobalFlags(..), ConfigExFlags(..)
                                        , InstallFlags(..)
                                        , defaultSandboxLocation )
 import Distribution.Simple.Compiler    ( Compiler, PackageDB(..)
-                                       , showCompilerId )
+                                       , compilerFlavor, showCompilerId )
 import Distribution.Simple.InstallDirs ( InstallDirs(..), PathTemplate
+                                       , defaultInstallDirs, combineInstallDirs
                                        , fromPathTemplate, toPathTemplate )
 import Distribution.Simple.Setup       ( Flag(..), ConfigFlags(..),
                                          fromFlagOrDefault, toFlag )
-import Distribution.Simple.Utils       ( die, notice, warn, lowercase )
+import Distribution.Simple.Utils       ( die, info, notice, warn, lowercase )
 import Distribution.ParseUtils         ( FieldDescr(..), ParseResult(..),
                                          commaListField,
                                          liftField, lineNo, locatedErrorMsg,
@@ -49,12 +50,13 @@ import Distribution.ParseUtils         ( FieldDescr(..), ParseResult(..),
                                          showPWarning, simpleField, syntaxError )
 import Distribution.System             ( Platform )
 import Distribution.Verbosity          ( Verbosity, normal )
-import Control.Monad                   ( foldM, when )
+import Control.Monad                   ( foldM, when, unless )
 import Data.List                       ( partition )
 import Data.Monoid                     ( Monoid(..) )
 import Distribution.Compat.Exception   ( catchIO )
-import System.Directory                ( doesFileExist, renameFile )
-import System.FilePath                 ( (<.>), (</>) )
+import System.Directory                ( doesDirectoryExist, doesFileExist,
+                                         renameFile )
+import System.FilePath                 ( (<.>), (</>), takeDirectory )
 import System.IO.Error                 ( isDoesNotExistError )
 import Text.PrettyPrint                ( ($+$) )
 
@@ -125,7 +127,7 @@ commonPackageEnvironmentConfig :: FilePath -> SavedConfig
 commonPackageEnvironmentConfig sandboxDir =
   mempty {
     savedConfigureFlags = mempty {
-       -- TODOи: Currently, we follow cabal-dev and set 'user-install: False' in
+       -- TODO: Currently, we follow cabal-dev and set 'user-install: False' in
        -- the config file. In the future we may want to distinguish between
        -- global, sandbox and user install types.
        configUserInstall = toFlag False,
@@ -174,9 +176,15 @@ basePackageEnvironment =
 initialPackageEnvironment :: FilePath -> Compiler -> Platform
                              -> IO PackageEnvironment
 initialPackageEnvironment sandboxDir compiler platform = do
+  defInstallDirs <- defaultInstallDirs (compilerFlavor compiler)
+                    {- userInstall= -} False {- _hasLibs= -} False
   let initialConfig = commonPackageEnvironmentConfig sandboxDir
+      installDirs   = combineInstallDirs (\d f -> Flag $ fromFlagOrDefault d f)
+                      defInstallDirs (savedUserInstallDirs initialConfig)
   return $ mempty {
     pkgEnvSavedConfig = initialConfig {
+       savedUserInstallDirs   = installDirs,
+       savedGlobalInstallDirs = installDirs,
        savedGlobalFlags = (savedGlobalFlags initialConfig) {
           globalLocalRepos = [sandboxDir </> "packages"]
           },
@@ -206,10 +214,7 @@ overrideSandboxSettings :: PackageEnvironment -> PackageEnvironment ->
 overrideSandboxSettings pkgEnv0 pkgEnv =
   pkgEnv {
     pkgEnvSavedConfig = mappendedConf {
-       savedGlobalFlags = (savedGlobalFlags mappendedConf) {
-          globalLocalRepos = globalLocalRepos pkgEnvGlobalFlags
-          }
-       , savedConfigureFlags = (savedConfigureFlags mappendedConf) {
+         savedConfigureFlags = (savedConfigureFlags mappendedConf) {
           configPackageDBs = configPackageDBs pkgEnvConfigureFlags
           }
        , savedInstallFlags = (savedInstallFlags mappendedConf) {
@@ -221,7 +226,6 @@ overrideSandboxSettings pkgEnv0 pkgEnv =
   where
     pkgEnvConf           = pkgEnvSavedConfig pkgEnv
     mappendedConf        = (pkgEnvSavedConfig pkgEnv0) `mappend` pkgEnvConf
-    pkgEnvGlobalFlags    = savedGlobalFlags pkgEnvConf
     pkgEnvConfigureFlags = savedConfigureFlags pkgEnvConf
     pkgEnvInstallFlags   = savedInstallFlags pkgEnvConf
 
@@ -287,22 +291,28 @@ handleParseResult verbosity path minp =
       die $ "Error parsing package environment file " ++ path
         ++ maybe "" (\n -> ":" ++ show n) line ++ ":\n" ++ msg
 
--- | Try to load the package environment file (@cabal.sandbox.config@), exiting
--- with error if it doesn't exist. Also returns the path to the sandbox
--- directory. Note that the path parameter should be a name of an existing
--- directory.
-tryLoadSandboxPackageEnvironment :: Verbosity -> FilePath -> (Flag FilePath)
-                                    -> IO (FilePath, PackageEnvironment)
-tryLoadSandboxPackageEnvironment verbosity pkgEnvDir configFileFlag = do
-  let path = pkgEnvDir </> sandboxPackageEnvironmentFile
-  minp   <- readPackageEnvironmentFile mempty path
-  pkgEnv <- handleParseResult verbosity path minp
+-- | Try to load the given package environment file, exiting with error if it
+-- doesn't exist. Also returns the path to the sandbox directory. The path
+-- parameter should refer to an existing file.
+tryLoadSandboxPackageEnvironmentFile :: Verbosity -> FilePath -> (Flag FilePath)
+                                        -> IO (FilePath, PackageEnvironment)
+tryLoadSandboxPackageEnvironmentFile verbosity pkgEnvFile configFileFlag = do
+  let pkgEnvDir = takeDirectory pkgEnvFile
+  minp   <- readPackageEnvironmentFile mempty pkgEnvFile
+  pkgEnv <- handleParseResult verbosity pkgEnvFile minp
 
   -- Get the saved sandbox directory.
   -- TODO: Use substPathTemplate with compilerTemplateEnv ++ platformTemplateEnv.
   let sandboxDir = fromFlagOrDefault defaultSandboxLocation
                    . fmap fromPathTemplate . prefix . savedUserInstallDirs
                    . pkgEnvSavedConfig $ pkgEnv
+
+  -- Do some sanity checks
+  dirExists            <- doesDirectoryExist sandboxDir
+  -- TODO: Also check for an initialised package DB?
+  unless dirExists $
+    die ("No sandbox exists at " ++ sandboxDir)
+  info verbosity $ "Using a sandbox located at " ++ sandboxDir
 
   let base   = basePackageEnvironment
   let common = commonPackageEnvironment sandboxDir
@@ -323,19 +333,18 @@ data IncludeComments = IncludeComments | NoComments
 
 -- | Create a new package environment file, replacing the existing one if it
 -- exists. Note that the path parameters should point to existing directories.
-createPackageEnvironment :: Verbosity -> FilePath -> FilePath
-                            -> IncludeComments
-                            -> Compiler
-                            -> Platform
-                            -> IO ()
-createPackageEnvironment verbosity sandboxDir pkgEnvDir incComments
+createPackageEnvironmentFile :: Verbosity -> FilePath -> FilePath
+                                -> IncludeComments
+                                -> Compiler
+                                -> Platform
+                                -> IO ()
+createPackageEnvironmentFile verbosity sandboxDir pkgEnvFile incComments
   compiler platform = do
-  let path = pkgEnvDir </> sandboxPackageEnvironmentFile
-  notice verbosity $ "Writing default package environment to " ++ path
+  notice verbosity $ "Writing default package environment to " ++ pkgEnvFile
 
   commentPkgEnv <- commentPackageEnvironment sandboxDir
   initialPkgEnv <- initialPackageEnvironment sandboxDir compiler platform
-  writePackageEnvironmentFile path incComments commentPkgEnv initialPkgEnv
+  writePackageEnvironmentFile pkgEnvFile incComments commentPkgEnv initialPkgEnv
 
 -- | Descriptions of all fields in the package environment file.
 pkgEnvFieldDescrs :: [FieldDescr PackageEnvironment]

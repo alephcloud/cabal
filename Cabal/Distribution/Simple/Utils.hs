@@ -109,8 +109,9 @@ module Distribution.Simple.Utils (
         FileGlob(..),
 
         -- * temp files and dirs
-        withTempFile,
-        withTempDirectory,
+        TempFileOptions(..), defaultTempFileOptions,
+        withTempFile, withTempFileEx,
+        withTempDirectory, withTempDirectoryEx,
 
         -- * .cabal and .buildinfo files
         defaultPackageDesc,
@@ -159,8 +160,6 @@ import System.Directory
     , doesDirectoryExist, doesFileExist, removeFile, findExecutable )
 import System.Environment
     ( getProgName )
-import System.Cmd
-    ( rawSystem )
 import System.Exit
     ( exitWith, ExitCode(..) )
 import System.FilePath
@@ -191,8 +190,8 @@ import qualified Distribution.ModuleName as ModuleName
 import Distribution.Version
     (Version(..))
 
-import Control.Exception (evaluate)
-import System.Process (runProcess)
+import Control.Exception (IOException, evaluate, throwIO)
+import System.Process (rawSystem, runProcess)
 
 import Control.Concurrent (forkIO)
 import System.Process (runInteractiveProcess, waitForProcess)
@@ -206,7 +205,7 @@ import Distribution.Compat.CopyFile
 import Distribution.Compat.TempFile
          ( openTempFile, createTempDirectory )
 import Distribution.Compat.Exception
-         ( IOException, throwIOIO, tryIO, catchIO, catchExit )
+         ( tryIO, catchIO, catchExit )
 import Distribution.Verbosity
 
 #ifdef VERSION_base
@@ -742,11 +741,11 @@ createDirectoryIfMissingVerbose verbosity create_parents path0
     parents = reverse . scanl1 (</>) . splitDirectories . normalise
 
     createDirs []         = return ()
-    createDirs (dir:[])   = createDir dir throwIOIO
+    createDirs (dir:[])   = createDir dir throwIO
     createDirs (dir:dirs) =
       createDir dir $ \_ -> do
         createDirs dirs
-        createDir dir throwIOIO
+        createDir dir throwIO
 
     createDir :: FilePath -> (IOException -> IO ()) -> IO ()
     createDir dir notExistHandler = do
@@ -765,9 +764,9 @@ createDirectoryIfMissingVerbose verbosity create_parents path0
           | isAlreadyExistsError e -> (do
               isDir <- doesDirectoryExist dir
               if isDir then return ()
-                       else throwIOIO e
+                       else throwIO e
               ) `catchIO` ((\_ -> return ()) :: IOException -> IO ())
-          | otherwise              -> throwIOIO e
+          | otherwise              -> throwIO e
 
 createDirectoryVerbose :: Verbosity -> FilePath -> IO ()
 createDirectoryVerbose verbosity dir = do
@@ -908,17 +907,33 @@ copyDirectoryRecursiveVerbose verbosity srcDir destDir = do
 ---------------------------
 -- Temporary files and dirs
 
+-- | Advanced options for 'withTempFile' and 'withTempDirectory'.
+data TempFileOptions = TempFileOptions {
+  optKeepTempFiles :: Bool  -- ^ Keep temporary files?
+  }
+
+defaultTempFileOptions :: TempFileOptions
+defaultTempFileOptions = TempFileOptions { optKeepTempFiles = False }
+
 -- | Use a temporary filename that doesn't already exist.
 --
-withTempFile :: Bool     -- ^ Keep temporary files?
-             -> FilePath -- ^ Temp dir to create the file in
-             -> String   -- ^ File name template. See 'openTempFile'.
-             -> (FilePath -> Handle -> IO a) -> IO a
-withTempFile keepTempFiles tmpDir template action =
+withTempFile :: FilePath    -- ^ Temp dir to create the file in
+                -> String   -- ^ File name template. See 'openTempFile'.
+                -> (FilePath -> Handle -> IO a) -> IO a
+withTempFile tmpDir template action =
+  withTempFileEx defaultTempFileOptions tmpDir template action
+
+-- | A version of 'withTempFile' that additionally takes a 'TempFileOptions'
+-- argument.
+withTempFileEx :: TempFileOptions
+                 -> FilePath -- ^ Temp dir to create the file in
+                 -> String   -- ^ File name template. See 'openTempFile'.
+                 -> (FilePath -> Handle -> IO a) -> IO a
+withTempFileEx opts tmpDir template action =
   Exception.bracket
     (openTempFile tmpDir template)
     (\(name, handle) -> do hClose handle
-                           unless keepTempFiles $ removeFile name)
+                           unless (optKeepTempFiles opts) $ removeFile name)
     (uncurry action)
 
 -- | Create and use a temporary directory.
@@ -932,12 +947,19 @@ withTempFile keepTempFiles tmpDir template action =
 -- @src/sdist.342@.
 --
 withTempDirectory :: Verbosity
-                  -> Bool     -- ^ Keep temporary files?
-                  -> FilePath -> String -> (FilePath -> IO a) -> IO a
-withTempDirectory _verbosity keepTempFiles targetDir template =
+                     -> FilePath -> String -> (FilePath -> IO a) -> IO a
+withTempDirectory verbosity targetDir template =
+  withTempDirectoryEx verbosity defaultTempFileOptions targetDir template
+
+-- | A version of 'withTempDirectory' that additionally takes a
+-- 'TempFileOptions' argument.
+withTempDirectoryEx :: Verbosity
+                       -> TempFileOptions
+                       -> FilePath -> String -> (FilePath -> IO a) -> IO a
+withTempDirectoryEx _verbosity opts targetDir template =
   Exception.bracket
     (createTempDirectory targetDir template)
-    (unless keepTempFiles . removeDirectoryRecursive)
+    (unless (optKeepTempFiles opts) . removeDirectoryRecursive)
 
 -----------------------------------
 -- Safely reading and writing files
