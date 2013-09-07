@@ -172,12 +172,14 @@ getHTTP _verbosity uri etag = do
         liftM responseToResponse $ HTTPC.httpLbs authReq manager
 
   getAuthInfo = do
-    case break (/= ':') userInfo of
+    case break (== ':') (dropEnd 1 userInfo) of
       ("", "")          -> return Nothing
       (user, "")        -> do
           p <- promptPassword realm
           return $ Just (B8.pack user, B8.pack p)
       (user, _colon : pwd) -> return $ Just (B8.pack user, B8.pack pwd)
+
+  dropEnd i x = take (length x - i) x
 
 responseToResponse :: HTTPC.Response ByteString -> Response ByteString
 responseToResponse res = let status = HTTPC.responseStatus res in
