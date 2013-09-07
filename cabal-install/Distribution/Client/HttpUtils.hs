@@ -118,7 +118,7 @@ mkRequest uri etag = HTTPC.def
 
   port = case portStr of
     "" -> if secure then 443 else 80
-    p -> read p
+    p -> read $ drop 1 p
 
   secure = if uriScheme uri == "https:" then True else False
 
