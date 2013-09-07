@@ -38,7 +38,7 @@ import System.FilePath
 import System.Directory
          ( doesFileExist )
 
--- the remaining import are related to HTTPS support for getHTTP
+import Control.Concurrent ( newMVar, MVar, modifyMVar )
 import Control.Exception ( bracket )
 import Control.Monad ( when )
 import Control.Monad.IO.Class ( MonadIO, liftIO )
@@ -47,6 +47,7 @@ import qualified Data.ByteString.Char8 as B8
 import qualified Data.CaseInsensitive as CI ( original, mk )
 import Data.Default ( def )
 import Data.Maybe ( mapMaybe )
+import qualified Data.Map as M
 
 import qualified Network.HTTP.Conduit as HTTPC
 import Network.HTTP.Headers ( parseHeader, lookupHeader, HeaderName(HdrETag) )
@@ -56,6 +57,7 @@ import qualified Network.TLS as TLS
          ( CertificateUsage( CertificateUsageAccept ) )
 
 import System.IO ( hFlush, stdin, stdout, hGetEcho, hSetEcho )
+import System.IO.Unsafe ( unsafePerformIO )
 
 data DownloadResult = FileAlreadyInCache | FileDownloaded FilePath deriving (Eq)
 
@@ -122,6 +124,11 @@ mkRequest uri etag = HTTPC.def
 
   secure = if uriScheme uri == "https:" then True else False
 
+-- | FIXME this is a HACK
+
+pwdCache :: MVar (M.Map URIAuth (B8.ByteString, B8.ByteString))
+pwdCache = unsafePerformIO $ newMVar M.empty
+
 -- | FIXME
 --
 -- * respect proxy settings
@@ -134,7 +141,11 @@ getHTTP :: Verbosity
         -> IO (Result (Response ByteString))
 getHTTP _verbosity uri etag = do
 
-  authInfo <- getAuthInfo
+  authInfo <- modifyMVar pwdCache $ \m -> case M.lookup uriAuth m of
+    Just x -> return (m, Just x)
+    Nothing -> getAuthInfo >>= \x -> case x of
+      Just y -> return (M.insert uriAuth y m, Just y)
+      Nothing -> return (m, Nothing)
 
   withInsecureManager $ \manager -> do
     response <- case authInfo of
@@ -155,21 +166,21 @@ getHTTP _verbosity uri etag = do
 
   req = mkRequest uri etag
 
-  (userInfo, realm) = case uriAuthority uri of
+  uriAuth@(URIAuth userInfo realm _) = case uriAuthority uri of
     Nothing -> error "local URIs are not supported by this function" -- FIXME
-    Just (URIAuth a b _) -> (a,b)
+    Just x -> x
 
   -- FOR TESTING ONLY
   withInsecureManager = HTTPC.withManagerSettings settings
-      where
-      settings = def { HTTPC.managerCheckCerts = accept }
-      accept _ _ _ = return TLS.CertificateUsageAccept
+    where
+    settings = def { HTTPC.managerCheckCerts = accept }
+    accept _ _ _ = return TLS.CertificateUsageAccept
 
   requestWithAuth username password manager = do
-        when (not (HTTPC.secure req)) . error $
-          "Authentication is not supported over an insecure connection" -- FIXME
-        let authReq = HTTPC.applyBasicAuth username password req
-        liftM responseToResponse $ HTTPC.httpLbs authReq manager
+    when (not (HTTPC.secure req)) . error $
+      "Authentication is not supported over an insecure connection" -- FIXME
+    let authReq = HTTPC.applyBasicAuth username password req
+    liftM responseToResponse $ HTTPC.httpLbs authReq manager
 
   getAuthInfo = do
     case break (== ':') (dropEnd 1 userInfo) of
