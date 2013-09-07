@@ -1,14 +1,11 @@
 {-# LANGUAGE CPP #-}
-{-# OPTIONS_HADDOCK hide #-}
-module Distribution.Compat.Exception (
+module Distribution.Client.Compat.Exception (
   mask,
-  mask_,
-  catchIO,
-  catchExit,
+  mask_
   ) where
 
-import System.Exit
-import qualified Control.Exception as Exception
+-- We can't move these functions to Distribution.Compat.Exception because the
+-- usage of the MIN_VERSION_base macro breaks bootstrapping.
 
 #if MIN_VERSION_base(4,3,0)
 -- it's much less of a headache if we re-export the "real" mask and mask_
@@ -27,9 +24,3 @@ mask handler = block (handler unblock)
 mask_ :: IO a -> IO a
 mask_ = block
 #endif
-
-catchIO :: IO a -> (Exception.IOException -> IO a) -> IO a
-catchIO = Exception.catch
-
-catchExit :: IO a -> (ExitCode -> IO a) -> IO a
-catchExit = Exception.catch

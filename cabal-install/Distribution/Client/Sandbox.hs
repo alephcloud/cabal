@@ -69,7 +69,7 @@ import Distribution.PackageDescription.Configuration
 import Distribution.PackageDescription.Parse  ( readPackageDescription )
 import Distribution.Simple.Compiler           ( Compiler(..), PackageDB(..)
                                               , PackageDBStack )
-import Distribution.Simple.Configure          ( configCompilerAux
+import Distribution.Simple.Configure          ( configCompilerAuxEx
                                               , interpretPackageDbFlags
                                               , getPackageDBContents )
 import Distribution.Simple.PreProcess         ( knownSuffixHandlers )
@@ -86,8 +86,8 @@ import Distribution.Package                   ( Package(..) )
 import Distribution.System                    ( Platform )
 import Distribution.Text                      ( display )
 import Distribution.Verbosity                 ( Verbosity, lessVerbose )
-import Distribution.Compat.Env                ( lookupEnv, setEnv )
-import Distribution.Compat.FilePerms          ( setFileHidden )
+import Distribution.Client.Compat.Environment ( lookupEnv, setEnv )
+import Distribution.Client.Compat.FilePerms   ( setFileHidden )
 import qualified Distribution.Client.Sandbox.Index as Index
 import qualified Distribution.Simple.PackageIndex  as InstalledPackageIndex
 import qualified Distribution.Simple.Register      as Register
@@ -275,14 +275,14 @@ dumpPackageEnvironment verbosity _sandboxFlags globalFlags = do
 -- | Entry point for the 'cabal sandbox-init' command.
 sandboxInit :: Verbosity -> SandboxFlags  -> GlobalFlags -> IO ()
 sandboxInit verbosity sandboxFlags globalFlags = do
-  -- Check that there is no 'cabal-dev' directory.
+  -- Warn if there's a 'cabal-dev' sandbox.
   isCabalDevSandbox <- liftM2 (&&) (doesDirectoryExist "cabal-dev")
                        (doesFileExist $ "cabal-dev" </> "cabal.config")
   when isCabalDevSandbox $
-    die $
+    warn verbosity $
     "You are apparently using a legacy (cabal-dev) sandbox. "
-    ++ "To use native cabal sandboxing, please delete the 'cabal-dev' directory "
-    ++  "and run 'cabal sandbox init'."
+    ++ "Legacy sandboxes may interact badly with native Cabal sandboxes. "
+    ++ "You may want to delete the 'cabal-dev' directory to prevent issues."
 
   -- Create the sandbox directory.
   let sandboxDir' = fromFlagOrDefault defaultSandboxLocation
@@ -290,26 +290,31 @@ sandboxInit verbosity sandboxFlags globalFlags = do
   createDirectoryIfMissingVerbose verbosity True sandboxDir'
   sandboxDir <- tryCanonicalizePath sandboxDir'
   setFileHidden sandboxDir
-  notice verbosity $ "Using a sandbox located at " ++ sandboxDir
 
   -- Determine which compiler to use (using the value from ~/.cabal/config).
   userConfig <- loadConfig verbosity (globalConfigFile globalFlags) NoFlag
-  (comp, platform, _) <- configCompilerAux (savedConfigureFlags userConfig)
+  (comp, platform, conf) <- configCompilerAuxEx (savedConfigureFlags userConfig)
 
   -- Create the package environment file.
   pkgEnvFile <- getSandboxConfigFilePath globalFlags
   createPackageEnvironmentFile verbosity sandboxDir pkgEnvFile
     NoComments comp platform
-  (_, pkgEnv) <- tryLoadSandboxConfig verbosity globalFlags
+  (_sandboxDir, pkgEnv) <- tryLoadSandboxConfig verbosity globalFlags
+  let config      = pkgEnvSavedConfig pkgEnv
+      configFlags = savedConfigureFlags config
 
   -- Create the index file if it doesn't exist.
-  indexFile <- tryGetIndexFilePath (pkgEnvSavedConfig pkgEnv)
+  indexFile <- tryGetIndexFilePath config
+  indexFileExists <- doesFileExist indexFile
+  if indexFileExists
+    then notice verbosity $ "Using an existing sandbox located at " ++ sandboxDir
+    else notice verbosity $ "Creating a new sandbox at " ++ sandboxDir
   Index.createEmpty verbosity indexFile
 
-  -- We don't create the package DB for the default compiler here: it's created
-  -- by demand in 'install' and 'configure'. This way, if you run 'sandbox init'
-  -- and then 'configure -w /path/to/nondefault-ghc', you'll end up with a
-  -- package DB for only one compiler instead of two.
+  -- Create the package DB for the default compiler.
+  initPackageDBIfNeeded verbosity configFlags comp conf
+  maybeAddCompilerTimestampRecord verbosity sandboxDir indexFile
+    (compilerId comp) platform
 
 -- | Entry point for the 'cabal sandbox-delete' command.
 sandboxDelete :: Verbosity -> SandboxFlags -> GlobalFlags -> IO ()
@@ -353,7 +358,7 @@ doAddSource verbosity buildTreeRefs sandboxDir pkgEnv refType = do
 
   -- If we're running 'sandbox add-source' for the first time for this compiler,
   -- we need to create an initial timestamp record.
-  (comp, platform, _) <- configCompilerAux . savedConfigureFlags $ savedConfig
+  (comp, platform, _) <- configCompilerAuxEx . savedConfigureFlags $ savedConfig
   maybeAddCompilerTimestampRecord verbosity sandboxDir indexFile
     (compilerId comp) platform
 
@@ -428,6 +433,11 @@ sandboxDeleteSource verbosity buildTreeRefs _sandboxFlags globalFlags = do
 
   withRemoveTimestamps sandboxDir $ do
     Index.removeBuildTreeRefs verbosity indexFile buildTreeRefs
+
+  notice verbosity $ "Note: 'sandbox delete-source' only unregisters the " ++
+    "source dependency, but does not remove the package " ++
+    "from the sandbox package DB.\n\n" ++
+    "Use 'sandbox hc-pkg -- unregister' to do that."
 
 -- | Entry point for the 'cabal sandbox list-sources' command.
 sandboxListSources :: Verbosity -> SandboxFlags -> GlobalFlags
@@ -715,6 +725,6 @@ configPackageDB' cfg =
 configCompilerAux' :: ConfigFlags
                    -> IO (Compiler, Platform, ProgramConfiguration)
 configCompilerAux' configFlags =
-  configCompilerAux configFlags
+  configCompilerAuxEx configFlags
     --FIXME: make configCompilerAux use a sensible verbosity
     { configVerbosity = fmap lessVerbose (configVerbosity configFlags) }

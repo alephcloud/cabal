@@ -1,7 +1,7 @@
 module Distribution.Compat.Exception (
-     catchIO,
-     catchExit,
-     tryIO,
+  catchIO,
+  catchExit,
+  tryIO,
   ) where
 
 import System.Exit

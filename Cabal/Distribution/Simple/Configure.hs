@@ -59,6 +59,7 @@ module Distribution.Simple.Configure (configure,
                                       localBuildInfoFile,
                                       getInstalledPackages, getPackageDBContents,
                                       configCompiler, configCompilerAux,
+                                      configCompilerEx, configCompilerAuxEx,
                                       ccLdOptionsBuildInfo,
                                       checkForeignDeps,
                                       interpretPackageDbFlags,
@@ -66,6 +67,7 @@ module Distribution.Simple.Configure (configure,
                                       ConfigStateFileErrorType(..),
                                       ConfigStateFileError,
                                       tryGetConfigStateFile,
+                                      platformDefines,
                                      )
     where
 
@@ -75,6 +77,7 @@ import Distribution.Simple.Compiler
     ( CompilerFlavor(..), Compiler(compilerId), compilerFlavor, compilerVersion
     , showCompilerId, unsupportedLanguages, unsupportedExtensions
     , PackageDB(..), PackageDBStack )
+import Distribution.Simple.PreProcess ( platformDefines )
 import Distribution.Package
     ( PackageName(PackageName), PackageIdentifier(..), PackageId
     , packageName, packageVersion, Package(..)
@@ -98,6 +101,7 @@ import Distribution.Simple.Hpc ( enableCoverage )
 import Distribution.Simple.Program
     ( Program(..), ProgramLocation(..), ConfiguredProgram(..)
     , ProgramConfiguration, defaultProgramConfiguration
+    , ProgramSearchPathEntry(..), getProgramSearchPath, setProgramSearchPath
     , configureAllKnownPrograms, knownPrograms, lookupKnownProgram
     , userSpecifyArgss, userSpecifyPaths
     , requireProgram, requireProgramVersion
@@ -115,12 +119,13 @@ import Distribution.Simple.LocalBuildInfo
 import Distribution.Simple.BuildPaths
     ( autogenModulesDir )
 import Distribution.Simple.Utils
-    ( die, warn, info, setupMessage, createDirectoryIfMissingVerbose
+    ( die, warn, info, setupMessage
+    , createDirectoryIfMissingVerbose, moreRecentFile
     , intercalate, cabalVersion
     , withFileContents, writeFileAtomic
     , withTempFile )
 import Distribution.System
-    ( OS(..), buildOS, Arch(..), Platform(..), buildPlatform )
+    ( OS(..), buildOS, Platform, buildPlatform )
 import Distribution.Version
          ( Version(..), anyVersion, orLaterVersion, withinRange, isAnyVersion )
 import Distribution.Verbosity
@@ -146,8 +151,7 @@ import Data.Maybe
 import Data.Monoid
     ( Monoid(..) )
 import System.Directory
-    ( doesFileExist, getModificationTime,
-      createDirectoryIfMissing, getTemporaryDirectory )
+    ( doesFileExist, createDirectoryIfMissing, getTemporaryDirectory )
 import System.FilePath
     ( (</>), isAbsolute )
 import qualified System.Info
@@ -270,9 +274,7 @@ parseHeader header = case words header of
 -- .cabal file.
 checkPersistBuildConfigOutdated :: FilePath -> FilePath -> IO Bool
 checkPersistBuildConfigOutdated distPref pkg_descr_file = do
-  t0 <- getModificationTime pkg_descr_file
-  t1 <- getModificationTime $ localBuildInfoFile distPref
-  return (t0 > t1)
+  pkg_descr_file `moreRecentFile` (localBuildInfoFile distPref)
 
 -- |@dist\/setup-config@
 localBuildInfoFile :: FilePath -> FilePath
@@ -295,15 +297,13 @@ configure (pkg_descr0, pbi) cfg
 
         createDirectoryIfMissingVerbose (lessVerbose verbosity) True distPref
 
-        let programsConfig = userSpecifyArgss (configProgramArgs cfg)
-                           . userSpecifyPaths (configProgramPaths cfg)
-                           $ configPrograms cfg
-            userInstall = fromFlag (configUserInstall cfg)
-            packageDbs  = interpretPackageDbFlags userInstall
-                            (configPackageDBs cfg)
+        let programsConfig = mkProgramsConfig cfg (configPrograms cfg)
+            userInstall    = fromFlag (configUserInstall cfg)
+            packageDbs     = interpretPackageDbFlags userInstall
+                             (configPackageDBs cfg)
 
         -- detect compiler
-        (comp, compPlatform, programsConfig') <- configCompiler
+        (comp, compPlatform, programsConfig') <- configCompilerEx
           (flagToMaybe $ configHcFlavor cfg)
           (flagToMaybe $ configHcPath cfg) (flagToMaybe $ configHcPkg cfg)
           programsConfig (lessVerbose verbosity)
@@ -570,6 +570,7 @@ configure (pkg_descr0, pbi) cfg
         dirinfo "Private binaries" (libexecdir dirs) (libexecdir relative)
         dirinfo "Data files"       (datadir dirs)    (datadir relative)
         dirinfo "Documentation"    (docdir dirs)     (docdir relative)
+        dirinfo "Configuration files" (sysconfdir dirs) (sysconfdir relative)
 
         sequence_ [ reportProgram verbosity prog configuredProg
                   | (prog, configuredProg) <- knownPrograms programsConfig''' ]
@@ -587,6 +588,16 @@ configure (pkg_descr0, pbi) cfg
           in pkg_descr{ library     = modifyLib        `fmap` library pkg_descr
                       , executables = modifyExecutable  `map`
                                       executables pkg_descr}
+
+mkProgramsConfig :: ConfigFlags -> ProgramConfiguration -> ProgramConfiguration
+mkProgramsConfig cfg initialProgramsConfig = programsConfig
+  where
+    programsConfig = userSpecifyArgss (configProgramArgs cfg)
+                   . userSpecifyPaths (configProgramPaths cfg)
+                   . setProgramSearchPath searchpath
+                   $ initialProgramsConfig
+    searchpath     = getProgramSearchPath (initialProgramsConfig)
+                  ++ map ProgramSearchPathDir (configProgramPathExtra cfg)
 
 -- -----------------------------------------------------------------------------
 -- Configuring package dependencies
@@ -844,22 +855,21 @@ ccLdOptionsBuildInfo cflags ldflags =
 -- -----------------------------------------------------------------------------
 -- Determining the compiler details
 
-configCompilerAux :: ConfigFlags -> IO (Compiler, Platform, ProgramConfiguration)
-configCompilerAux cfg = configCompiler (flagToMaybe $ configHcFlavor cfg)
-                                       (flagToMaybe $ configHcPath cfg)
-                                       (flagToMaybe $ configHcPkg cfg)
-                                       programsConfig
-                                       (fromFlag (configVerbosity cfg))
+configCompilerAuxEx :: ConfigFlags
+                    -> IO (Compiler, Platform, ProgramConfiguration)
+configCompilerAuxEx cfg = configCompilerEx (flagToMaybe $ configHcFlavor cfg)
+                                           (flagToMaybe $ configHcPath cfg)
+                                           (flagToMaybe $ configHcPkg cfg)
+                                           programsConfig
+                                           (fromFlag (configVerbosity cfg))
   where
-    programsConfig = userSpecifyArgss (configProgramArgs cfg)
-                   . userSpecifyPaths (configProgramPaths cfg)
-                   $ defaultProgramConfiguration
+    programsConfig = mkProgramsConfig cfg defaultProgramConfiguration
 
-configCompiler :: Maybe CompilerFlavor -> Maybe FilePath -> Maybe FilePath
-               -> ProgramConfiguration -> Verbosity
-               -> IO (Compiler, Platform, ProgramConfiguration)
-configCompiler Nothing _ _ _ _ = die "Unknown compiler"
-configCompiler (Just hcFlavor) hcPath hcPkg conf verbosity = do
+configCompilerEx :: Maybe CompilerFlavor -> Maybe FilePath -> Maybe FilePath
+                 -> ProgramConfiguration -> Verbosity
+                 -> IO (Compiler, Platform, ProgramConfiguration)
+configCompilerEx Nothing _ _ _ _ = die "Unknown compiler"
+configCompilerEx (Just hcFlavor) hcPath hcPkg conf verbosity = do
   (comp, maybePlatform, programsConfig) <- case hcFlavor of
     GHC  -> GHC.configure  verbosity hcPath hcPkg conf
     JHC  -> JHC.configure  verbosity hcPath hcPkg conf
@@ -871,6 +881,24 @@ configCompiler (Just hcFlavor) hcPath hcPkg conf verbosity = do
     _    -> die "Unknown compiler"
   return (comp, fromMaybe buildPlatform maybePlatform, programsConfig)
 
+-- Ideally we would like to not have separate configCompiler* and
+-- configCompiler*Ex sets of functions, but there are many custom setup scripts
+-- in the wild that are using them, so the versions with old types are kept for
+-- backwards compatibility. Platform was added to the return triple in 1.18.
+
+{-# DEPRECATED configCompiler
+    "'configCompiler' is deprecated. Use 'configCompilerEx' instead." #-}
+configCompiler :: Maybe CompilerFlavor -> Maybe FilePath -> Maybe FilePath
+               -> ProgramConfiguration -> Verbosity
+               -> IO (Compiler, ProgramConfiguration)
+configCompiler mFlavor hcPath hcPkg conf verbosity =
+  fmap (\(a,_,b) -> (a,b)) $ configCompilerEx mFlavor hcPath hcPkg conf verbosity
+
+{-# DEPRECATED configCompilerAux
+    "configCompilerAux is deprecated. Use 'configCompilerAuxEx' instead." #-}
+configCompilerAux :: ConfigFlags
+                  -> IO (Compiler, ProgramConfiguration)
+configCompilerAux = fmap (\(a,_,b) -> (a,b)) . configCompilerAuxEx
 
 -- -----------------------------------------------------------------------------
 -- Making the internal component graph
@@ -999,7 +1027,7 @@ checkForeignDeps pkg lbi verbosity = do
 
         libExists lib = builds (makeProgram []) (makeLdArgs [lib])
 
-        commonCppArgs = hcDefines (compiler lbi)
+        commonCppArgs = platformDefines lbi
                      ++ [ "-I" ++ autogenModulesDir lbi ]
                      ++ [ "-I" ++ dir | dir <- collectField PD.includeDirs ]
                      ++ ["-I."]
@@ -1097,68 +1125,6 @@ checkForeignDeps pkg lbi verbosity = do
              "The header file contains a compile error. "
           ++ "You can re-run configure with the verbosity flag "
           ++ "-v3 to see the error messages from the C compiler."
-
-        --FIXME: share this with the PreProcessor module
-        hcDefines :: Compiler -> [String]
-        hcDefines comp =
-          case compilerFlavor comp of
-            GHC  ->
-                let ghcOS = case hostOS of
-                            Linux     -> ["linux"]
-                            Windows   -> ["mingw32"]
-                            OSX       -> ["darwin"]
-                            FreeBSD   -> ["freebsd"]
-                            OpenBSD   -> ["openbsd"]
-                            NetBSD    -> ["netbsd"]
-                            Solaris   -> ["solaris2"]
-                            AIX       -> ["aix"]
-                            HPUX      -> ["hpux"]
-                            IRIX      -> ["irix"]
-                            HaLVM     -> []
-                            IOS       -> ["ios"]
-                            OtherOS _ -> []
-                    ghcArch = case hostArch of
-                              I386        -> ["i386"]
-                              X86_64      -> ["x86_64"]
-                              PPC         -> ["powerpc"]
-                              PPC64       -> ["powerpc64"]
-                              Sparc       -> ["sparc"]
-                              Arm         -> ["arm"]
-                              Mips        -> ["mips"]
-                              SH          -> []
-                              IA64        -> ["ia64"]
-                              S390        -> ["s390"]
-                              Alpha       -> ["alpha"]
-                              Hppa        -> ["hppa"]
-                              Rs6000      -> ["rs6000"]
-                              M68k        -> ["m68k"]
-                              Vax         -> ["vax"]
-                              OtherArch _ -> []
-                in ["-D__GLASGOW_HASKELL__=" ++ versionInt version] ++
-                   map (\os   -> "-D" ++ os   ++ "_HOST_OS=1")   ghcOS ++
-                   map (\arch -> "-D" ++ arch ++ "_HOST_ARCH=1") ghcArch
-            JHC  -> ["-D__JHC__=" ++ versionInt version]
-            NHC  -> ["-D__NHC__=" ++ versionInt version]
-            Hugs -> ["-D__HUGS__"]
-            _    -> []
-          where
-            Platform hostArch hostOS = hostPlatform lbi
-            version = compilerVersion comp
-                      -- TODO: move this into the compiler abstraction
-            -- FIXME: this forces GHC's crazy 4.8.2 -> 408 convention on all
-            -- the other compilers. Check if that's really what they want.
-            versionInt :: Version -> String
-            versionInt (Version { versionBranch = [] }) = "1"
-            versionInt (Version { versionBranch = [n] }) = show n
-            versionInt (Version { versionBranch = n1:n2:_ })
-              = -- 6.8.x -> 608
-                -- 6.10.x -> 610
-                let s1 = show n1
-                    s2 = show n2
-                    middle = case s2 of
-                             _ : _ : _ -> ""
-                             _         -> "0"
-                in s1 ++ middle ++ s2
 
 -- | Output package check warnings and errors. Exit if any errors.
 checkPackageProblems :: Verbosity

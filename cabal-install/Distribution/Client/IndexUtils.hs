@@ -62,7 +62,7 @@ import Data.Maybe  (mapMaybe, fromMaybe)
 import Data.List   (isPrefixOf)
 import Data.Monoid (Monoid(..))
 import qualified Data.Map as Map
-import Control.Monad (MonadPlus(mplus), when, unless, liftM)
+import Control.Monad (MonadPlus(mplus), when, liftM)
 import Control.Exception (evaluate)
 import qualified Data.ByteString.Lazy as BS
 import qualified Data.ByteString.Lazy.Char8 as BS.Char8
@@ -70,16 +70,15 @@ import qualified Data.ByteString.Char8 as BSS
 import Data.ByteString.Lazy (ByteString)
 import Distribution.Client.GZipUtils (maybeDecompress)
 import Distribution.Client.Utils (byteStringToFilePath)
+import Distribution.Compat.Exception (catchIO)
+import Distribution.Client.Compat.Time
+import System.Directory (doesFileExist)
 import System.FilePath ((</>), takeExtension, splitDirectories, normalise)
 import System.FilePath.Posix as FilePath.Posix
          ( takeFileName )
 import System.IO
 import System.IO.Unsafe (unsafeInterleaveIO)
 import System.IO.Error (isDoesNotExistError)
-import Distribution.Compat.Exception (catchIO)
-import System.Directory
-         ( getModificationTime, doesFileExist )
-import Distribution.Compat.Time
 
 
 getInstalledPackages :: Verbosity -> Compiler
@@ -234,16 +233,15 @@ updateRepoIndexCache verbosity repo =
     indexFile = repoLocalDir repo </> "00-index.tar"
     cacheFile = repoLocalDir repo </> "00-index.cache"
 
-whenCacheOutOfDate :: FilePath-> FilePath -> IO () -> IO ()
+whenCacheOutOfDate :: FilePath -> FilePath -> IO () -> IO ()
 whenCacheOutOfDate origFile cacheFile action = do
   exists <- doesFileExist cacheFile
   if not exists
     then action
     else do
-      origTime  <- getModificationTime origFile
-      cacheTime <- getModificationTime cacheFile
-      unless (cacheTime > origTime) action
-
+      origTime  <- getModTime origFile
+      cacheTime <- getModTime cacheFile
+      when (origTime >= cacheTime) action
 
 ------------------------------------------------------------------------
 -- Reading the index file

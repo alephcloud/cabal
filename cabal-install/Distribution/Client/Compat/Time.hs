@@ -1,5 +1,6 @@
 {-# LANGUAGE CPP, ForeignFunctionInterface #-}
-module Distribution.Compat.Time (EpochTime, getModTime, getFileAge, getCurTime)
+module Distribution.Client.Compat.Time
+       (EpochTime, getModTime, getFileAge, getCurTime)
        where
 
 import Data.Int (Int64)
@@ -18,7 +19,7 @@ import System.Time (ClockTime(..), getClockTime
 import Data.Int         (Int32)
 import Data.Word        (Word32)
 import Foreign          (Ptr, allocaBytes, peekByteOff)
-import Foreign.C.Types  (CChar(..))
+import Foreign.C.Types  (CChar)
 import Foreign.C.String (withCString)
 import System.IO.Error  (mkIOError, doesNotExistErrorType)
 
@@ -65,7 +66,7 @@ getModTime path = withCString path $ \file ->
     if not res
       then do
         let err = mkIOError doesNotExistErrorType
-                  "Distribution.Compat.Time.getModTime"
+                  "Distribution.Client.Compat.Time.getModTime"
                   Nothing (Just path)
         ioError err
       else do

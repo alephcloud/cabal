@@ -108,6 +108,9 @@ module Distribution.Simple.Utils (
         parseFileGlob,
         FileGlob(..),
 
+        -- * modification time
+        moreRecentFile,
+
         -- * temp files and dirs
         TempFileOptions(..), defaultTempFileOptions,
         withTempFile, withTempFileEx,
@@ -157,7 +160,8 @@ import qualified Data.ByteString.Lazy.Char8 as BS.Char8
 
 import System.Directory
     ( Permissions(executable), getDirectoryContents, getPermissions
-    , doesDirectoryExist, doesFileExist, removeFile, findExecutable )
+    , doesDirectoryExist, doesFileExist, removeFile, findExecutable
+    , getModificationTime )
 import System.Environment
     ( getProgName )
 import System.Exit
@@ -414,15 +418,17 @@ rawSystemExitWithEnv verbosity path args env = do
 rawSystemIOWithEnv :: Verbosity
                    -> FilePath
                    -> [String]
-                   -> [(String, String)]
+                   -> Maybe FilePath           -- ^ New working dir or inherit
+                   -> Maybe [(String, String)] -- ^ New environment or inherit
                    -> Maybe Handle  -- ^ stdin
                    -> Maybe Handle  -- ^ stdout
                    -> Maybe Handle  -- ^ stderr
                    -> IO ExitCode
-rawSystemIOWithEnv verbosity path args env inp out err = do
-    printRawCommandAndArgsAndEnv verbosity path args env
+rawSystemIOWithEnv verbosity path args mcwd menv inp out err = do
+    maybe (printRawCommandAndArgs       verbosity path args)
+          (printRawCommandAndArgsAndEnv verbosity path args) menv
     hFlush stdout
-    ph <- runProcess path args Nothing (Just env) inp out err
+    ph <- runProcess path args mcwd menv inp out err
     exitcode <- waitForProcess ph
     unless (exitcode == ExitSuccess) $ do
       debug verbosity $ path ++ " returned " ++ show exitcode
@@ -435,6 +441,7 @@ rawSystemIOWithEnv verbosity path args env inp out err = do
 rawSystemStdout :: Verbosity -> FilePath -> [String] -> IO String
 rawSystemStdout verbosity path args = do
   (output, errors, exitCode) <- rawSystemStdInOut verbosity path args
+                                                  Nothing Nothing
                                                   Nothing False
   when (exitCode /= ExitSuccess) $
     die errors
@@ -445,15 +452,18 @@ rawSystemStdout verbosity path args = do
 -- mode of the input and output.
 --
 rawSystemStdInOut :: Verbosity
-                  -> FilePath -> [String]
-                  -> Maybe (String, Bool) -- ^ input text and binary mode
-                  -> Bool                 -- ^ output in binary mode
+                  -> FilePath                 -- ^ Program location
+                  -> [String]                 -- ^ Arguments
+                  -> Maybe FilePath           -- ^ New working dir or inherit
+                  -> Maybe [(String, String)] -- ^ New environment or inherit
+                  -> Maybe (String, Bool)     -- ^ input text and binary mode
+                  -> Bool                     -- ^ output in binary mode
                   -> IO (String, String, ExitCode) -- ^ output, errors, exit
-rawSystemStdInOut verbosity path args input outputBinary = do
+rawSystemStdInOut verbosity path args mcwd menv input outputBinary = do
   printRawCommandAndArgs verbosity path args
 
   Exception.bracket
-     (runInteractiveProcess path args Nothing Nothing)
+     (runInteractiveProcess path args mcwd menv)
      (\(inh,outh,errh,_) -> hClose inh >> hClose outh >> hClose errh)
     $ \(inh,outh,errh,pid) -> do
 
@@ -724,6 +734,23 @@ matchDirFileGlob dir filepath = case parseFileGlob filepath of
       []      -> die $ "filepath wildcard '" ++ filepath
                     ++ "' does not match any files."
       matches -> return matches
+
+--------------------
+-- Modification time
+
+-- | Compare the modification times of two files to see if the first is newer
+-- than the second. The first file must exist but the second need not.
+-- The expected use case is when the second file is generated using the first.
+-- In this use case, if the result is True then the second file is out of date.
+--
+moreRecentFile :: FilePath -> FilePath -> IO Bool
+moreRecentFile a b = do
+  exists <- doesFileExist b
+  if not exists
+    then return True
+    else do tb <- getModificationTime b
+            ta <- getModificationTime a
+            return (ta > tb)
 
 ----------------------------------------
 -- Copying and installing files and dirs

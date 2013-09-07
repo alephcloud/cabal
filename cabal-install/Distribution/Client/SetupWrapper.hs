@@ -38,7 +38,7 @@ import Distribution.PackageDescription
 import Distribution.PackageDescription.Parse
          ( readPackageDescription )
 import Distribution.Simple.Configure
-         ( configCompiler )
+         ( configCompilerEx )
 import Distribution.Compiler ( buildCompilerId )
 import Distribution.Simple.Compiler
          ( CompilerFlavor(GHC), Compiler(compilerId)
@@ -46,7 +46,11 @@ import Distribution.Simple.Compiler
          , PackageDB(..), PackageDBStack )
 import Distribution.Simple.Program
          ( ProgramConfiguration, emptyProgramConfiguration
-         , getDbProgramOutput, runDbProgram, ghcProgram )
+         , getProgramSearchPath, getDbProgramOutput, runDbProgram, ghcProgram )
+import Distribution.Simple.Program.Find
+         ( programSearchPathAsPATHVar )
+import Distribution.Simple.Program.Run
+         ( getEffectiveEnvironment )
 import Distribution.Simple.BuildPaths
          ( defaultDistPref, exeExtension )
 import Distribution.Simple.Command
@@ -66,9 +70,9 @@ import Distribution.Simple.Setup
 import Distribution.Simple.Utils
          ( die, debug, info, cabalVersion, findPackageDesc, comparing
          , createDirectoryIfMissingVerbose, installExecutableFile
-         , rewriteFile, intercalate )
+         , moreRecentFile, rewriteFile, intercalate )
 import Distribution.Client.Utils
-         ( moreRecentFile, inDir, tryCanonicalizePath )
+         ( inDir, tryCanonicalizePath )
 import Distribution.System ( Platform(..), buildPlatform )
 import Distribution.Text
          ( display )
@@ -217,7 +221,7 @@ externalSetupMethod verbosity options pkg bt mkargs = do
     -- types?
     Simple -> getCachedSetupExecutable options' cabalLibVersion setupHs
     _      -> compileSetupExecutable options' cabalLibVersion setupHs False
-  invokeSetupScript path (mkargs cabalLibVersion)
+  invokeSetupScript options' path (mkargs cabalLibVersion)
 
   where
   workingDir       = case fromMaybe "" (useWorkingDir options) of
@@ -302,7 +306,7 @@ externalSetupMethod verbosity options pkg bt mkargs = do
     (comp, conf) <- case useCompiler options' of
       Just comp -> return (comp, useProgramConfig options')
       Nothing   -> do (comp, _, conf) <-
-                        configCompiler (Just GHC) Nothing Nothing
+                        configCompilerEx (Just GHC) Nothing Nothing
                         (useProgramConfig options') verbosity
                       return (comp, conf)
     -- Whenever we need to call configureCompiler, we also need to access the
@@ -422,10 +426,10 @@ externalSetupMethod verbosity options pkg bt mkargs = do
     where
       setupProgFile = setupDir </> "setup" <.> exeExtension
 
-  invokeSetupScript :: FilePath -> [String] -> IO ()
-  invokeSetupScript path args = do
+  invokeSetupScript :: SetupScriptOptions -> FilePath -> [String] -> IO ()
+  invokeSetupScript options' path args = do
     info verbosity $ unwords (path : args)
-    case useLoggingHandle options of
+    case useLoggingHandle options' of
       Nothing        -> return ()
       Just logHandle -> info verbosity $ "Redirecting build log to "
                                       ++ show logHandle
@@ -436,8 +440,12 @@ externalSetupMethod verbosity options pkg bt mkargs = do
     -- working directory.
     path' <- tryCanonicalizePath path
 
+    searchpath <- programSearchPathAsPATHVar
+                    (getProgramSearchPath (useProgramConfig options'))
+    env        <- getEffectiveEnvironment [("PATH", Just searchpath)]
+
     process <- runProcess path' args
-                 (useWorkingDir options) Nothing
-                 Nothing (useLoggingHandle options) (useLoggingHandle options)
+                 (useWorkingDir options') env
+                 Nothing (useLoggingHandle options') (useLoggingHandle options')
     exitCode <- waitForProcess process
     unless (exitCode == ExitSuccess) $ exitWith exitCode

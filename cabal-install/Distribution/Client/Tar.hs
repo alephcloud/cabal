@@ -85,15 +85,15 @@ import qualified System.FilePath         as FilePath.Native
 import qualified System.FilePath.Windows as FilePath.Windows
 import qualified System.FilePath.Posix   as FilePath.Posix
 import System.Directory
-         ( getDirectoryContents, doesDirectoryExist, getModificationTime
+         ( getDirectoryContents, doesDirectoryExist
          , getPermissions, createDirectoryIfMissing, copyFile )
 import qualified System.Directory as Permissions
          ( Permissions(executable) )
-import Distribution.Compat.FilePerms
+import Distribution.Client.Compat.FilePerms
          ( setFileExecutable )
 import System.Posix.Types
          ( FileMode )
-import Distribution.Compat.Time
+import Distribution.Client.Compat.Time
 import System.IO
          ( IOMode(ReadMode), openBinaryFile, hFileSize )
 import System.IO.Unsafe (unsafeInterleaveIO)

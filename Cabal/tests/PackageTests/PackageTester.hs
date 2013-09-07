@@ -40,6 +40,7 @@ import System.IO.Error (isDoesNotExistError)
 import System.Process (runProcess, waitForProcess)
 import Test.HUnit (Assertion, assertFailure)
 
+import Distribution.Simple.BuildPaths (exeExtension)
 import Distribution.Compat.CreatePipe (createPipe)
 import Distribution.ReadE (readEOrFail)
 import Distribution.Verbosity (Verbosity, deafening, flagToVerbosity, normal,
@@ -80,76 +81,75 @@ recordRun (cmd, exitCode, exeOutput) thisSucc res =
             cmd ++ "\n" ++ exeOutput
         }
 
-cabal_configure :: PackageSpec -> IO Result
-cabal_configure spec = do
-    res <- doCabalConfigure spec
+cabal_configure :: PackageSpec -> FilePath -> IO Result
+cabal_configure spec ghcPath = do
+    res <- doCabalConfigure spec ghcPath
     record spec res
     return res
 
-doCabalConfigure :: PackageSpec -> IO Result
-doCabalConfigure spec = do
-    cleanResult@(_, _, _) <- cabal spec ["clean"]
+doCabalConfigure :: PackageSpec -> FilePath -> IO Result
+doCabalConfigure spec ghcPath = do
+    cleanResult@(_, _, _) <- cabal spec ["clean"] ghcPath
     requireSuccess cleanResult
-    ghc <- getGHC
-    res <- cabal spec $ ["configure", "--user", "-w", ghc] ++ configOpts spec
+    res <- cabal spec
+           (["configure", "--user", "-w", ghcPath] ++ configOpts spec)
+           ghcPath
     return $ recordRun res ConfigureSuccess nullResult
 
-doCabalBuild :: PackageSpec -> IO Result
-doCabalBuild spec = do
-    configResult <- doCabalConfigure spec
+doCabalBuild :: PackageSpec -> FilePath -> IO Result
+doCabalBuild spec ghcPath = do
+    configResult <- doCabalConfigure spec ghcPath
     if successful configResult
         then do
-            res <- cabal spec ["build", "-v"]
+            res <- cabal spec ["build", "-v"] ghcPath
             return $ recordRun res BuildSuccess configResult
         else
             return configResult
 
-cabal_build :: PackageSpec -> IO Result
-cabal_build spec = do
-    res <- doCabalBuild spec
+cabal_build :: PackageSpec -> FilePath -> IO Result
+cabal_build spec ghcPath = do
+    res <- doCabalBuild spec ghcPath
     record spec res
     return res
 
-unregister :: String -> IO ()
-unregister libraryName = do
-    ghcPkg <- getGHCPkg
-    res@(_, _, output) <- run Nothing ghcPkg ["unregister", "--user", libraryName]
+unregister :: String -> FilePath -> IO ()
+unregister libraryName ghcPkgPath = do
+    res@(_, _, output) <- run Nothing ghcPkgPath ["unregister", "--user", libraryName]
     if "cannot find package" `isInfixOf` output
         then return ()
         else requireSuccess res
 
 -- | Install this library in the user area
-cabal_install :: PackageSpec -> IO Result
-cabal_install spec = do
-    buildResult <- doCabalBuild spec
+cabal_install :: PackageSpec -> FilePath -> IO Result
+cabal_install spec ghcPath = do
+    buildResult <- doCabalBuild spec ghcPath
     res <- if successful buildResult
         then do
-            res <- cabal spec ["install"]
+            res <- cabal spec ["install"] ghcPath
             return $ recordRun res InstallSuccess buildResult
         else
             return buildResult
     record spec res
     return res
 
-cabal_test :: PackageSpec -> [String] -> IO Result
-cabal_test spec extraArgs = do
-    res <- cabal spec $ "test" : extraArgs
+cabal_test :: PackageSpec -> [String] -> FilePath -> IO Result
+cabal_test spec extraArgs ghcPath = do
+    res <- cabal spec ("test" : extraArgs) ghcPath
     let r = recordRun res TestSuccess nullResult
     record spec r
     return r
 
-cabal_bench :: PackageSpec -> [String] -> IO Result
-cabal_bench spec extraArgs = do
-    res <- cabal spec $ "bench" : extraArgs
+cabal_bench :: PackageSpec -> [String] -> FilePath -> IO Result
+cabal_bench spec extraArgs ghcPath = do
+    res <- cabal spec ("bench" : extraArgs) ghcPath
     let r = recordRun res BenchSuccess nullResult
     record spec r
     return r
 
-compileSetup :: FilePath -> IO ()
-compileSetup packageDir = do
+compileSetup :: FilePath -> FilePath -> IO ()
+compileSetup packageDir ghcPath = do
     wd <- getCurrentDirectory
-    ghc <- getGHC
-    r <- run (Just $ packageDir) ghc
+    r <- run (Just $ packageDir) ghcPath
          [ "--make"
 -- HPC causes trouble -- see #1012
 --       , "-fhpc"
@@ -159,12 +159,12 @@ compileSetup packageDir = do
     requireSuccess r
 
 -- | Returns the command that was issued, the return code, and the output text.
-cabal :: PackageSpec -> [String] -> IO (String, ExitCode, String)
-cabal spec cabalArgs = do
+cabal :: PackageSpec -> [String] -> FilePath -> IO (String, ExitCode, String)
+cabal spec cabalArgs ghcPath = do
     customSetup <- doesFileExist (directory spec </> "Setup.hs")
     if customSetup
         then do
-            compileSetup (directory spec)
+            compileSetup (directory spec) ghcPath
             path <- canonicalizePath $ directory spec </> "Setup"
             run (Just $ directory spec) path cabalArgs
         else do
@@ -176,9 +176,13 @@ cabal spec cabalArgs = do
 run :: Maybe FilePath -> String -> [String] -> IO (String, ExitCode, String)
 run cwd path args = do
     verbosity <- getVerbosity
-    printRawCommandAndArgs verbosity path args
+    -- path is relative to the current directory; canonicalizePath makes it
+    -- absolute, so that runProcess will find it even when changing directory.
+    path' <- do pathExists <- doesFileExist path
+                canonicalizePath (if pathExists then path else path <.> exeExtension)
+    printRawCommandAndArgs verbosity path' args
     (readh, writeh) <- createPipe
-    pid <- runProcess path args cwd Nothing Nothing (Just writeh) (Just writeh)
+    pid <- runProcess path' args cwd Nothing Nothing (Just writeh) (Just writeh)
 
     -- fork off a thread to start consuming the output
     out <- suckH [] readh
@@ -186,7 +190,7 @@ run cwd path args = do
 
     -- wait for the program to terminate
     exitcode <- waitForProcess pid
-    let fullCmd = unwords (path : args)
+    let fullCmd = unwords (path' : args)
     return ("\"" ++ fullCmd ++ "\" in " ++ fromMaybe "" cwd, exitcode, out)
   where
     suckH output h = do
@@ -243,26 +247,26 @@ assertInstallSucceeded result = unless (successful result) $
 
 assertOutputContains :: String -> Result -> Assertion
 assertOutputContains needle result =
-    unless (needle `isInfixOf` (unwords $ lines output)) $
+    unless (needle `isInfixOf` (concatOutput output)) $
     assertFailure $
-    " expected: " ++ needle ++
-    "in output: " ++ output
+    " expected: " ++ needle ++ "\n" ++
+    " in output: " ++ output ++ ""
   where output = outputText result
 
 assertOutputDoesNotContain :: String -> Result -> Assertion
 assertOutputDoesNotContain needle result =
-    when (needle `isInfixOf` (unwords $ lines output)) $
+    when (needle `isInfixOf` (concatOutput output)) $
     assertFailure $
     "unexpected: " ++ needle ++
     " in output: " ++ output
   where output = outputText result
 
+-- | Replace line breaks with spaces, correctly handling "\r\n".
+concatOutput :: String -> String
+concatOutput = unwords . lines . filter ((/=) '\r')
+
 ------------------------------------------------------------------------
--- Finding ghc and related tools
---
--- To allow the test suite to be run using other GHC versions than the
--- one symlinked as ghc, we look in the environment for GHC and
--- GHC_PKG.
+-- Verbosity
 
 lookupEnv :: String -> IO (Maybe String)
 lookupEnv name =
@@ -271,15 +275,6 @@ lookupEnv name =
         if isDoesNotExistError e
         then return Nothing
         else E.throw e
-
-getGHC :: IO String
-getGHC = fromMaybe "ghc" `fmap` lookupEnv "GHC"
-
-getGHCPkg :: IO String
-getGHCPkg = do
-    ghc <- getGHC
-    -- Somewhat brittle, but better than nothing.
-    return $ "ghc-pkg" ++ drop 3 ghc
 
 -- TODO: Convert to a "-v" flag instead.
 getVerbosity :: IO Verbosity

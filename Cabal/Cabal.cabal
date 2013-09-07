@@ -140,6 +140,8 @@ library
   ghc-options: -Wall -fno-ignore-asserts -fwarn-tabs
 
   exposed-modules:
+    Distribution.Compat.Environment
+    Distribution.Compat.Exception
     Distribution.Compat.ReadP
     Distribution.Compiler
     Distribution.InstalledPackageInfo
@@ -183,6 +185,7 @@ library
     Distribution.Simple.Program.Ar
     Distribution.Simple.Program.Builtin
     Distribution.Simple.Program.Db
+    Distribution.Simple.Program.Find
     Distribution.Simple.Program.GHC
     Distribution.Simple.Program.HcPkg
     Distribution.Simple.Program.Hpc
@@ -206,7 +209,6 @@ library
 
   other-modules:
     Distribution.Compat.CopyFile
-    Distribution.Compat.Exception
     Distribution.Compat.TempFile
     Distribution.GetOpt
     Distribution.Simple.GHC.IPI641

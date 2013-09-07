@@ -476,6 +476,27 @@ The library section should contain the following fields:
 The library section may also contain build information fields (see the
 section on [build information](#build-information)).
 
+#### Opening an interpreter session ####
+
+While developing a package, it is often useful to make its code available inside
+an interpreter session. This can be done with the `repl` command:
+
+~~~~~~~~~~~~~~~~
+cabal repl
+~~~~~~~~~~~~~~~~
+
+The name comes from the acronym [REPL], which stands for
+"read-eval-print-loop". By default `cabal repl` loads the first component in a
+package. If the package contains several named components, the name can be given
+as an argument to `repl`. The name can be also optionally prefixed with the
+component's type for disambiguation purposes. Example:
+
+~~~~~~~~~~~~~~~~
+cabal repl foo
+cabal repl exe:foo
+cabal repl test:bar
+cabal repl bench:baz
+~~~~~~~~~~~~~~~~
 
 ### Executables ###
 
@@ -1532,12 +1553,11 @@ a few options:
     `unregister`, `clean`, `dist` and `docs`. Some options to commands
     are passed through as follows:
 
-      * The `--with-hc-pkg`, `--prefix`, `--bindir`, `--libdir`,
-        `--datadir` and `--libexecdir` options to the `configure`
-        command are passed on to the `configure` script. In addition the
-        value of the `--with-compiler` option is passed in a `--with-hc`
-        option and all options specified with `--configure-option=` are
-        passed on.
+      * The `--with-hc-pkg`, `--prefix`, `--bindir`, `--libdir`, `--datadir`,
+        `--libexecdir` and `--sysconfdir` options to the `configure` command are
+        passed on to the `configure` script. In addition the value of the
+        `--with-compiler` option is passed in a `--with-hc` option and all
+        options specified with `--configure-option=` are passed on.
 
       * The `--destdir` option to the `copy` command becomes a setting
         of a `destdir` variable on the invocation of `make copy`. The
@@ -1550,7 +1570,8 @@ a few options:
                                 bindir=$(destdir)/$(bindir) \
                                 libdir=$(destdir)/$(libdir) \
                                 datadir=$(destdir)/$(datadir) \
-                                libexecdir=$(destdir)/$(libexecdir)
+                                libexecdir=$(destdir)/$(libexecdir) \
+                                sysconfdir=$(destdir)/$(sysconfdir) \
         ~~~~~~~~~~~~~~~~
 
   * You can write your own setup script conforming to the interface
@@ -1578,3 +1599,4 @@ a few options:
 [happy]:      http://www.haskell.org/happy/
 [Hackage]:    http://hackage.haskell.org/
 [pkg-config]: http://pkg-config.freedesktop.org/
+[REPL]:       http://en.wikipedia.org/wiki/Read%E2%80%93eval%E2%80%93print_loop

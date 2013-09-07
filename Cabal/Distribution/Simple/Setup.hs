@@ -67,6 +67,7 @@ module Distribution.Simple.Setup (
   HscolourFlags(..), emptyHscolourFlags, defaultHscolourFlags, hscolourCommand,
   BuildFlags(..),    emptyBuildFlags,    defaultBuildFlags,    buildCommand,
   buildVerbose,
+  ReplFlags(..),                         defaultReplFlags,     replCommand,
   CleanFlags(..),    emptyCleanFlags,    defaultCleanFlags,    cleanCommand,
   RegisterFlags(..), emptyRegisterFlags, defaultRegisterFlags, registerCommand,
                                                                unregisterCommand,
@@ -274,6 +275,7 @@ data ConfigFlags = ConfigFlags {
 
     configProgramPaths  :: [(String, FilePath)], -- ^user specifed programs paths
     configProgramArgs   :: [(String, [String])], -- ^user specifed programs args
+    configProgramPathExtra :: [FilePath],        -- ^Extend the $PATH
     configHcFlavor      :: Flag CompilerFlavor, -- ^The \"flavor\" of the
                                                 -- compiler, sugh as GHC or
                                                 -- Hugs.
@@ -487,6 +489,12 @@ configureOptions showOrParseArgs =
          "A list of directories to search for external libraries"
          configExtraLibDirs (\v flags -> flags {configExtraLibDirs = v})
          (reqArg' "PATH" (\x -> [x]) id)
+
+      ,option "" ["extra-prog-path"]
+         "A list of directories to search for required programs (in addition to the normal search locations)"
+         configProgramPathExtra (\v flags -> flags {configProgramPathExtra = v})
+         (reqArg' "PATH" (\x -> [x]) id)
+
       ,option "" ["constraint"]
          "A list of additional constraints on the dependencies."
          configConstraints (\v flags -> flags { configConstraints = v})
@@ -588,6 +596,11 @@ installDirsOptions =
       "installation directory for haddock interfaces"
       haddockdir (\v flags -> flags { haddockdir = v })
       installDirArg
+
+  , option "" ["sysconfdir"]
+      "installation directory for configuration files"
+      sysconfdir (\v flags -> flags { sysconfdir = v })
+      installDirArg
   ]
   where
     installDirArg _sf _lf d get set =
@@ -602,6 +615,7 @@ instance Monoid ConfigFlags where
     configPrograms      = error "FIXME: remove configPrograms",
     configProgramPaths  = mempty,
     configProgramArgs   = mempty,
+    configProgramPathExtra = mempty,
     configHcFlavor      = mempty,
     configHcPath        = mempty,
     configHcPkg         = mempty,
@@ -635,6 +649,7 @@ instance Monoid ConfigFlags where
     configPrograms      = configPrograms b,
     configProgramPaths  = combine configProgramPaths,
     configProgramArgs   = combine configProgramArgs,
+    configProgramPathExtra = combine configProgramPathExtra,
     configHcFlavor      = combine configHcFlavor,
     configHcPath        = combine configHcPath,
     configHcPkg         = combine configHcPkg,
@@ -1338,8 +1353,22 @@ buildCommand progConf = makeCommand name shortDesc longDesc
                         defaultBuildFlags (buildOptions progConf)
   where
     name       = "build"
-    shortDesc  = "Make this package ready for installation."
-    longDesc   = Nothing
+    shortDesc  = "Compile all targets or specific targets."
+    longDesc   = Just $ \pname ->
+       "Examples:\n"
+        ++ "  " ++ pname ++ " build           "
+        ++ "    All the components in the package\n"
+        ++ "  " ++ pname ++ " build foo       "
+        ++ "    A component (i.e. lib, exe, test suite)\n"
+--TODO: re-enable once we have support for module/file targets
+--        ++ "  " ++ pname ++ " build Foo.Bar   "
+--        ++ "    A module\n"
+--        ++ "  " ++ pname ++ " build Foo/Bar.hs"
+--        ++ "    A file\n\n"
+--        ++ "If a target is ambigious it can be qualified with the component "
+--        ++ "name, e.g.\n"
+--        ++ "  " ++ pname ++ " build foo:Foo.Bar\n"
+--        ++ "  " ++ pname ++ " build testsuite1:Foo/Bar.hs\n"
 
 buildOptions :: ProgramConfiguration -> ShowOrParseArgs
                 -> [OptionField BuildFlags]
@@ -1377,6 +1406,92 @@ instance Monoid BuildFlags where
     buildArgs        = combine buildArgs
   }
     where combine field = field a `mappend` field b
+
+-- ------------------------------------------------------------
+-- * Repl Flags
+-- ------------------------------------------------------------
+
+data ReplFlags = ReplFlags {
+    replProgramPaths :: [(String, FilePath)],
+    replProgramArgs :: [(String, [String])],
+    replDistPref    :: Flag FilePath,
+    replVerbosity   :: Flag Verbosity,
+    replReload      :: Flag Bool
+  }
+  deriving Show
+
+defaultReplFlags :: ReplFlags
+defaultReplFlags  = ReplFlags {
+    replProgramPaths = mempty,
+    replProgramArgs = [],
+    replDistPref    = Flag defaultDistPref,
+    replVerbosity   = Flag normal,
+    replReload      = Flag False
+  }
+
+instance Monoid ReplFlags where
+  mempty = ReplFlags {
+    replProgramPaths = mempty,
+    replProgramArgs = mempty,
+    replVerbosity   = mempty,
+    replDistPref    = mempty,
+    replReload      = mempty
+  }
+  mappend a b = ReplFlags {
+    replProgramPaths = combine replProgramPaths,
+    replProgramArgs = combine replProgramArgs,
+    replVerbosity   = combine replVerbosity,
+    replDistPref    = combine replDistPref,
+    replReload      = combine replReload
+  }
+    where combine field = field a `mappend` field b
+
+replCommand :: ProgramConfiguration -> CommandUI ReplFlags
+replCommand progConf = CommandUI {
+    commandName         = "repl",
+    commandSynopsis     = "Open an interpreter session for the given target.",
+    commandDescription  = Just $ \pname ->
+       "Examples:\n"
+        ++ "  " ++ pname ++ " repl           "
+        ++ "    The first component in the package\n"
+        ++ "  " ++ pname ++ " repl foo       "
+        ++ "    A named component (i.e. lib, exe, test suite)\n",
+--TODO: re-enable once we have support for module/file targets
+--        ++ "  " ++ pname ++ " repl Foo.Bar   "
+--        ++ "    A module\n"
+--        ++ "  " ++ pname ++ " repl Foo/Bar.hs"
+--        ++ "    A file\n\n"
+--        ++ "If a target is ambigious it can be qualified with the component "
+--        ++ "name, e.g.\n"
+--        ++ "  " ++ pname ++ " repl foo:Foo.Bar\n"
+--        ++ "  " ++ pname ++ " repl testsuite1:Foo/Bar.hs\n"
+
+    commandUsage =  \pname -> "Usage: " ++ pname ++ " repl [FILENAME] [FLAGS]\n",
+    commandDefaultFlags = defaultReplFlags,
+    commandOptions = \showOrParseArgs ->
+      optionVerbosity replVerbosity (\v flags -> flags { replVerbosity = v })
+      : optionDistPref
+          replDistPref (\d flags -> flags { replDistPref = d })
+          showOrParseArgs
+
+      : programConfigurationPaths   progConf showOrParseArgs
+          replProgramPaths (\v flags -> flags { replProgramPaths = v})
+
+     ++ programConfigurationOption progConf showOrParseArgs
+          replProgramArgs (\v flags -> flags { replProgramArgs = v})
+
+     ++ programConfigurationOptions progConf showOrParseArgs
+          replProgramArgs (\v flags -> flags { replProgramArgs = v})
+
+     ++ case showOrParseArgs of
+          ParseArgs ->
+            [ option "" ["reload"]
+              "Used from within an interpreter to update files."
+              replReload (\v flags -> flags { replReload = v })
+              trueArg
+            ]
+          _ -> []
+    }
 
 -- ------------------------------------------------------------
 -- * Test flags
@@ -1727,6 +1842,7 @@ configureArgs bcHack flags
  ++ optFlag' "libdir"      libdir
  ++ optFlag' "libexecdir"  libexecdir
  ++ optFlag' "datadir"     datadir
+ ++ optFlag' "sysconfdir"  sysconfdir
  ++ configConfigureArgs flags
   where
         hc_flag = case (configHcFlavor flags, configHcPath flags) of

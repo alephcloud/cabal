@@ -60,7 +60,8 @@ import Distribution.Simple.Setup
          , Flag(..), toFlag, fromFlag, flagToMaybe, flagToList
          , optionVerbosity, boolOpt, trueArg, falseArg )
 import Distribution.Simple.InstallDirs
-         ( PathTemplate, toPathTemplate, fromPathTemplate )
+         ( PathTemplate, InstallDirs(sysconfdir)
+         , toPathTemplate, fromPathTemplate )
 import Distribution.Version
          ( Version(Version), anyVersion, thisVersion )
 import Distribution.Package
@@ -240,16 +241,21 @@ configureOptions = commandOptions configureCommand
 
 filterConfigureFlags :: ConfigFlags -> Version -> ConfigFlags
 filterConfigureFlags flags cabalLibVersion
-  | cabalLibVersion >= Version [1,14,0] [] = flags
+  | cabalLibVersion >= Version [1,18,0] [] = flags
   | cabalLibVersion <  Version [1,3,10] [] = flags_1_3_10
   | cabalLibVersion <  Version [1,10,0] [] = flags_1_10_0
   | cabalLibVersion <  Version [1,14,0] [] = flags_1_14_0
+  | cabalLibVersion <  Version [1,18,0] [] = flags_1_18_0
 
   -- A no-op that silences the "pattern match is non-exhaustive" warning.
   | otherwise = flags
   where
+    -- Cabal < 1.18.0 doesn't know about --extra-prog-path and --sysconfdir.
+    flags_1_18_0 = flags        { configProgramPathExtra = []
+                                , configInstallDirs = configInstallDirs_1_18_0}
+    configInstallDirs_1_18_0 = (configInstallDirs flags) { sysconfdir = NoFlag }
     -- Cabal < 1.14.0 doesn't know about --disable-benchmarks.
-    flags_1_14_0 = flags        { configBenchmarks  = NoFlag }
+    flags_1_14_0 = flags_1_18_0 { configBenchmarks  = NoFlag }
     -- Cabal < 1.10.0 doesn't know about --disable-tests.
     flags_1_10_0 = flags_1_14_0 { configTests       = NoFlag }
     -- Cabal < 1.3.10 does not grok the constraints flag.
@@ -495,7 +501,7 @@ fetchCommand = CommandUI {
 updateCommand  :: CommandUI (Flag Verbosity)
 updateCommand = CommandUI {
     commandName         = "update",
-    commandSynopsis     = "Updates list of known packages",
+    commandSynopsis     = "Updates list of known packages.",
     commandDescription  = Nothing,
     commandUsage        = usageFlags "update",
     commandDefaultFlags = toFlag normal,
@@ -526,7 +532,7 @@ cleanCommand = makeCommand name shortDesc longDesc emptyFlags options
 checkCommand  :: CommandUI (Flag Verbosity)
 checkCommand = CommandUI {
     commandName         = "check",
-    commandSynopsis     = "Check the package for common mistakes",
+    commandSynopsis     = "Check the package for common mistakes.",
     commandDescription  = Nothing,
     commandUsage        = \pname -> "Usage: " ++ pname ++ " check\n",
     commandDefaultFlags = toFlag normal,
@@ -1054,7 +1060,7 @@ defaultUploadFlags = UploadFlags {
 uploadCommand :: CommandUI UploadFlags
 uploadCommand = CommandUI {
     commandName         = "upload",
-    commandSynopsis     = "Uploads source packages to Hackage",
+    commandSynopsis     = "Uploads source packages to Hackage.",
     commandDescription  = Just $ \_ ->
          "You can store your Hackage login in the ~/.cabal/config file\n",
     commandUsage        = \pname ->
@@ -1385,13 +1391,13 @@ defaultSandboxFlags = SandboxFlags {
 sandboxCommand :: CommandUI SandboxFlags
 sandboxCommand = CommandUI {
   commandName         = "sandbox",
-  commandSynopsis     = "Create/modify/delete a sandbox",
+  commandSynopsis     = "Create/modify/delete a sandbox.",
   commandDescription  = Nothing,
   commandUsage        = \pname ->
        "Usage: " ++ pname ++ " sandbox init\n"
     ++ "   or: " ++ pname ++ " sandbox delete\n"
     ++ "   or: " ++ pname ++ " sandbox add-source  [PATHS]\n\n"
-    ++ "   or: " ++ pname ++ " sandbox hc-pkg      [ARGS]\n"
+    ++ "   or: " ++ pname ++ " sandbox hc-pkg      -- [ARGS]\n"
     ++ "   or: " ++ pname ++ " sandbox list-sources\n\n"
     ++ "Flags for sandbox:",
 
