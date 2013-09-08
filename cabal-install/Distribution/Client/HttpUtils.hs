@@ -5,6 +5,8 @@ module Distribution.Client.HttpUtils (
     DownloadResult(..),
     downloadURI,
     getHTTP,
+    doHTTP,
+    mkRequest,
     cabalBrowse,
     proxy,
     isOldHackageURI
@@ -42,6 +44,7 @@ import Control.Concurrent ( newMVar, MVar, modifyMVar )
 import Control.Exception ( bracket )
 import Control.Monad ( when )
 import Control.Monad.IO.Class ( MonadIO, liftIO )
+import Control.Monad.Trans.Resource
 
 import qualified Data.ByteString.Char8 as B8
 import qualified Data.CaseInsensitive as CI ( original, mk )
@@ -95,24 +98,32 @@ promptPassword realm = liftIO $ do
   putStrLn ""
   return passwd
 
-mkRequest :: URI
-          -> Maybe String -- ^ Optional etag to check if we already have the latest file
+-- | Construct an "Network.HTTP.Conduit" style HTTP request
+--
+mkRequest :: String                      -- ^ the HTTP method
+          -> URI
+          -> Maybe String                -- ^ Optional etag to check if we already have the latest file
+          -> Maybe (HTTPC.RequestBody m) -- ^ the body
           -> HTTPC.Request m
-mkRequest uri etag = HTTPC.def
-
-  { HTTPC.method = B8.pack "GET"
-  , HTTPC.path = B8.pack $ uriPath uri
-  , HTTPC.queryString = B8.pack $ uriQuery uri ++ uriFragment uri
-  , HTTPC.host = B8.pack $ regName
-  , HTTPC.port = port
-  , HTTPC.secure = secure
-  , HTTPC.requestHeaders = (HTTP.hUserAgent, B8.pack userAgent) : ifNoneMatchHdr
-  , HTTPC.checkStatus = \_ _ _ -> Nothing
-  }
+mkRequest method uri etag body
+  | Just b <- body = req { HTTPC.requestBody = b }
+  | otherwise = req
 
   where
+  req = HTTPC.def
+
+    { HTTPC.method = B8.pack $ method
+    , HTTPC.path = B8.pack $ uriPath uri
+    , HTTPC.queryString = B8.pack $ uriQuery uri ++ uriFragment uri
+    , HTTPC.host = B8.pack $ regName
+    , HTTPC.port = port
+    , HTTPC.secure = secure
+    , HTTPC.requestHeaders = (HTTP.hUserAgent, B8.pack userAgent) : ifNoneMatchHdr
+    , HTTPC.checkStatus = \_ _ _ -> Nothing
+    }
+
   ifNoneMatchHdr = maybe [] (\t -> [(CI.mk (B8.pack "if-none-match"), B8.pack t)]) etag
-  userAgent = "cabal-install/" ++ display Paths_cabal_install.version
+  userAgent = "cabal-install/" ++ display Paths_cabal_install_ssl.version
 
   (regName, portStr) = case uriAuthority uri of
       Nothing -> error "local URIs are not supported by this function" -- FIXME
@@ -125,21 +136,32 @@ mkRequest uri etag = HTTPC.def
   secure = if uriScheme uri == "https:" then True else False
 
 -- | FIXME this is a HACK
-
+--
+-- Memorizes authentication information per 'URIAuth'.
+--
 pwdCache :: MVar (M.Map URIAuth (B8.ByteString, B8.ByteString))
 pwdCache = unsafePerformIO $ newMVar M.empty
 
--- | FIXME
---
--- * respect proxy settings
---
--- * Set user agent Header
---
 getHTTP :: Verbosity
         -> URI
         -> Maybe String -- ^ Optional etag to check if we already have the latest file.
         -> IO (Result (Response ByteString))
-getHTTP _verbosity uri etag = do
+getHTTP _verbosity uri etag = doHTTP _verbosity uri $ mkRequest "GET" uri etag Nothing
+
+-- | Perform an HTTP request and handle authentication
+--
+-- Transforms reponse from "Network.HTTP.Conduit" style
+-- to 'cabalBrowse' style.
+--
+-- FIXME
+--
+-- * respect proxy settings
+--
+doHTTP :: Verbosity
+       -> URI
+       -> HTTPC.Request (ResourceT IO)
+       -> IO (Result (Response ByteString))
+doHTTP _verbosity uri req = do
 
   authInfo <- modifyMVar pwdCache $ \m -> case M.lookup uriAuth m of
     Just x -> return (m, Just x)
@@ -163,8 +185,6 @@ getHTTP _verbosity uri etag = do
     return $ Right response
 
   where
-
-  req = mkRequest uri etag
 
   uriAuth@(URIAuth userInfo realm _) = case uriAuthority uri of
     Nothing -> error "local URIs are not supported by this function" -- FIXME
