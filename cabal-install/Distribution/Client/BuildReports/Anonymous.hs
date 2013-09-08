@@ -33,7 +33,7 @@ import qualified Distribution.Client.Types as BR
          , DocsResult(..), TestsResult(..) )
 import Distribution.Client.Utils
          ( mergeBy, MergeResult(..) )
-import qualified Paths_cabal_install (version)
+import qualified Paths_cabal_install_ssl (version)
 
 import Distribution.Package
          ( PackageIdentifier(..), PackageName(..), Package(packageId) )
@@ -160,7 +160,7 @@ new os' arch' comp (ConfiguredPackage pkg flags _ deps) result =
 
 cabalInstallID :: PackageIdentifier
 cabalInstallID =
-  PackageIdentifier (PackageName "cabal-install") Paths_cabal_install.version
+  PackageIdentifier (PackageName "cabal-install-ssl") Paths_cabal_install_ssl.version
 
 -- ------------------------------------------------------------
 -- * External format

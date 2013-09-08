@@ -86,7 +86,7 @@ import qualified Distribution.Client.PackageIndex as SourcePackageIndex
 import qualified Distribution.Client.Win32SelfUpgrade as Win32SelfUpgrade
 import qualified Distribution.Client.World as World
 import qualified Distribution.InstalledPackageInfo as Installed
-import Paths_cabal_install (getBinDir)
+import Paths_cabal_install_ssl (getBinDir)
 import Distribution.Client.JobControl
 
 import Distribution.Simple.Compiler

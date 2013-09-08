@@ -23,7 +23,7 @@ import Control.Monad
          ( liftM )
 import Data.ByteString.Lazy (ByteString)
 
-import qualified Paths_cabal_install (version)
+import qualified Paths_cabal_install_ssl (version)
 import Distribution.Verbosity (Verbosity)
 import Distribution.Simple.Utils
          ( die, info, warn, debug, notice
