@@ -52,6 +52,7 @@ import Data.Default ( def )
 import Data.Maybe ( mapMaybe )
 import qualified Data.Map as M
 
+import Network (withSocketsDo)
 import qualified Network.HTTP.Conduit as HTTPC
 import Network.HTTP.Headers ( parseHeader, lookupHeader, HeaderName(HdrETag) )
 import qualified Network.HTTP.Types.Header as HTTP ( hUserAgent )
@@ -161,7 +162,7 @@ doHTTP :: Verbosity
        -> URI
        -> HTTPC.Request (ResourceT IO)
        -> IO (Result (Response ByteString))
-doHTTP _verbosity uri req = do
+doHTTP _verbosity uri req = withSocketsDo $ do
 
   authInfo <- modifyMVar pwdCache $ \m -> case M.lookup uriAuth m of
     Just x -> return (m, Just x)
