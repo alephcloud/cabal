@@ -34,7 +34,7 @@ Flag old-directory
   description:  Use directory < 1.2 and old-time
   default:      False
 
-executable cabal
+executable cabal-ssl
     main-is:        Main.hs
     ghc-options:    -Wall -fwarn-tabs
     other-modules:
