@@ -37,6 +37,8 @@ import Distribution.Client.FetchUtils
 import qualified Distribution.Client.Tar as Tar (extractTarGzFile)
 import Distribution.Client.IndexUtils as IndexUtils
         ( getSourcePackages )
+import Distribution.Compat.Exception
+        ( catchIO )
 
 import Control.Exception
          ( finally )
@@ -51,8 +53,6 @@ import Data.Monoid
          ( mempty )
 import Data.Ord
          ( comparing )
-import System.Cmd
-         ( rawSystem )
 import System.Directory
          ( createDirectoryIfMissing, doesDirectoryExist, doesFileExist
          , getCurrentDirectory, setCurrentDirectory
@@ -62,7 +62,7 @@ import System.Exit
 import System.FilePath
          ( (</>), (<.>), addTrailingPathSeparator )
 import System.Process
-         ( readProcessWithExitCode )
+         ( rawSystem, readProcessWithExitCode )
 
 
 -- | Entry point for the 'cabal get' command.
@@ -204,7 +204,7 @@ allBranchers =
 -- exits successfully, that brancher is considered usable.
 findUsableBranchers :: IO (Data.Map.Map PD.RepoType Brancher)
 findUsableBranchers = do
-    let usable (_, brancher) = do
+    let usable (_, brancher) = flip catchIO (const (return False)) $ do
          let cmd = brancherBinary brancher
          (exitCode, _, _) <- readProcessWithExitCode cmd ["--help"] ""
          return (exitCode == ExitSuccess)

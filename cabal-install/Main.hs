@@ -64,7 +64,7 @@ import Distribution.Client.Fetch              (fetch)
 import Distribution.Client.Check as Check     (check)
 --import Distribution.Client.Clean            (clean)
 import Distribution.Client.Upload as Upload   (upload, check, report)
-import Distribution.Client.Run                (run)
+import Distribution.Client.Run                (run, splitRunArgs)
 import Distribution.Client.SrcDist            (sdist)
 import Distribution.Client.Get                (get)
 import Distribution.Client.Sandbox            (sandboxInit
@@ -91,11 +91,12 @@ import Distribution.Client.Sandbox.PackageEnvironment
                                               (setPackageDB
                                               ,userPackageEnvironmentFile)
 import Distribution.Client.Sandbox.Timestamp  (maybeAddCompilerTimestampRecord)
-import Distribution.Client.Sandbox.Types      (UseSandbox(..), isUseSandbox
-                                              ,whenUsingSandbox)
+import Distribution.Client.Sandbox.Types      (UseSandbox(..), whenUsingSandbox)
 import Distribution.Client.Init               (initCabal)
 import qualified Distribution.Client.Win32SelfUpgrade as Win32SelfUpgrade
 
+import Distribution.PackageDescription
+         ( Executable(..) )
 import Distribution.Simple.Command
          ( CommandParse(..), CommandUI(..), Command
          , commandsRun, commandAddAction, hiddenCommand )
@@ -104,7 +105,7 @@ import Distribution.Simple.Compiler
 import Distribution.Simple.Configure
          ( checkPersistBuildConfigOutdated, configCompilerAuxEx
          , ConfigStateFileErrorType(..), localBuildInfoFile
-         , tryGetPersistBuildConfig )
+         , getPersistBuildConfig, tryGetPersistBuildConfig )
 import qualified Distribution.Simple.LocalBuildInfo as LBI
 import Distribution.Simple.Program (defaultProgramConfiguration)
 import qualified Distribution.Simple.Setup as Cabal
@@ -445,11 +446,10 @@ reconfigure verbosity distPref     addConfigFlags extraArgs globalFlags
           return (useSandbox, NoDepsReinstalled)
 
       -- Is the @cabal.config@ file newer than @dist/setup.config@? Then we need
-      -- to force reconfigure.
+      -- to force reconfigure. Note that it's possible to use @cabal.config@
+      -- even without sandboxes.
       isUserPackageEnvironmentFileNewer <-
-        if isUseSandbox useSandbox
-        then userPackageEnvironmentFile `existsAndIsMoreRecentThan` buildConfig
-        else return False
+        userPackageEnvironmentFile `existsAndIsMoreRecentThan` buildConfig
 
       -- Determine whether we need to reconfigure and which message to show to
       -- the user if that is the case.
@@ -815,11 +815,14 @@ runAction (buildFlags, buildExFlags) extraArgs globalFlags = do
                 globalFlags noAddSource (buildNumJobs buildExFlags)
                 (const Nothing)
 
-  maybeWithSandboxDirOnSearchPath useSandbox $
-    build verbosity distPref mempty []
+  lbi <- getPersistBuildConfig distPref
+  (exe, exeArgs) <- splitRunArgs lbi extraArgs
 
   maybeWithSandboxDirOnSearchPath useSandbox $
-    run verbosity buildFlags extraArgs
+    build verbosity distPref mempty ["exe:" ++ exeName exe]
+
+  maybeWithSandboxDirOnSearchPath useSandbox $
+    run verbosity lbi exe exeArgs
 
 getAction :: GetFlags -> [String] -> GlobalFlags -> IO ()
 getAction getFlags extraArgs globalFlags = do
