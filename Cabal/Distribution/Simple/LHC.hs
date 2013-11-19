@@ -96,7 +96,7 @@ import Distribution.Simple.Program
          , rawSystemProgramStdout, rawSystemProgramStdoutConf
          , requireProgramVersion
          , userMaybeSpecifyPath, programPath, lookupProgram, addKnownProgram
-         , arProgram, ranlibProgram, ldProgram
+         , arProgram, ldProgram
          , gccProgram, stripProgram
          , lhcProgram, lhcPkgProgram )
 import qualified Distribution.Simple.Program.HcPkg as HcPkg
@@ -116,6 +116,7 @@ import Language.Haskell.Extension
 
 import Control.Monad            ( unless, when )
 import Data.List
+import qualified Data.Map as M  ( empty )
 import Data.Maybe               ( catMaybes )
 import Data.Monoid              ( Monoid(..) )
 import System.Directory         ( removeFile, renameFile,
@@ -155,7 +156,8 @@ configure verbosity hcPath hcPkgPath conf = do
   let comp = Compiler {
         compilerId             = CompilerId LHC lhcVersion,
         compilerLanguages      = languages,
-        compilerExtensions     = extensions
+        compilerExtensions     = extensions,
+        compilerProperties     = M.empty
       }
       conf''' = configureToolchain lhcProg conf'' -- configure gcc and ld
       compPlatform = Nothing
@@ -781,12 +783,6 @@ installLib verbosity lbi targetDir dynlibTargetDir builtDir _pkg lib clbi = do
   ifGHCi    $ mapM_ (copy builtDir targetDir)       ghciLibNames
   ifShared  $ mapM_ (copy builtDir dynlibTargetDir) sharedLibNames
 
-  -- run ranlib if necessary:
-  ifVanilla $ mapM_ (updateLibArchive verbosity lbi . (targetDir </>))
-                    vanillaLibNames
-  ifProf    $ mapM_ (updateLibArchive verbosity lbi . (targetDir </>))
-                    profileLibNames
-
   where
     cid = compilerId (compiler lbi)
     libNames = componentLibraries clbi
@@ -803,20 +799,6 @@ installLib verbosity lbi targetDir dynlibTargetDir builtDir _pkg lib clbi = do
     ifShared  = when (hasLib && withSharedLib  lbi)
 
     runLhc    = rawSystemProgramConf verbosity lhcProgram (withPrograms lbi)
-
--- | use @ranlib@ or @ar -s@ to build an index. This is necessary on systems
--- like MacOS X. If we can't find those, don't worry too much about it.
---
-updateLibArchive :: Verbosity -> LocalBuildInfo -> FilePath -> IO ()
-updateLibArchive verbosity lbi path =
-  case lookupProgram ranlibProgram (withPrograms lbi) of
-    Just ranlib -> rawSystemProgram verbosity ranlib [path]
-    Nothing     -> case lookupProgram arProgram (withPrograms lbi) of
-      Just ar   -> rawSystemProgram verbosity ar ["-s", path]
-      Nothing   -> warn verbosity $
-                        "Unable to generate a symbol index for the static "
-                     ++ "library '" ++ path
-                     ++ "' (missing the 'ranlib' and 'ar' programs)"
 
 -- -----------------------------------------------------------------------------
 -- Registering

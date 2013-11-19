@@ -89,7 +89,7 @@ module Distribution.Simple.Setup (
   fromFlagOrDefault,
   flagToMaybe,
   flagToList,
-  boolOpt, boolOpt', trueArg, falseArg, optionVerbosity ) where
+  boolOpt, boolOpt', trueArg, falseArg, optionVerbosity, numJobsParser ) where
 
 import Distribution.Compiler ()
 import Distribution.ReadE
@@ -97,7 +97,9 @@ import Distribution.Text
          ( Text(..), display )
 import qualified Distribution.Compat.ReadP as Parse
 import qualified Text.PrettyPrint as Disp
-import Distribution.Package ( Dependency(..) )
+import Distribution.Package ( Dependency(..)
+                            , PackageName
+                            , InstalledPackageId )
 import Distribution.PackageDescription
          ( FlagName(..), FlagAssignment )
 import Distribution.Simple.Command hiding (boolOpt, boolOpt')
@@ -158,7 +160,7 @@ instance Functor Flag where
 instance Monoid (Flag a) where
   mempty = NoFlag
   _ `mappend` f@(Flag _) = f
-  f `mappend` NoFlag    = f
+  f `mappend` NoFlag     = f
 
 instance Bounded a => Bounded (Flag a) where
   minBound = toFlag minBound
@@ -307,6 +309,7 @@ data ConfigFlags = ConfigFlags {
     configStripExes :: Flag Bool,      -- ^Enable executable stripping
     configConstraints :: [Dependency], -- ^Additional constraints for
                                        -- dependencies
+    configDependencies :: [(PackageName, InstalledPackageId)], -- ^The packages depended on
     configConfigurationsFlags :: FlagAssignment,
     configTests :: Flag Bool,     -- ^Enable test suite compilation
     configBenchmarks :: Flag Bool,     -- ^Enable benchmark compilation
@@ -375,7 +378,12 @@ configureOptions showOrParseArgs =
                     , (Flag JHC, ([] , ["jhc"]), "compile with JHC")
                     , (Flag LHC, ([] , ["lhc"]), "compile with LHC")
                     , (Flag Hugs,([] , ["hugs"]), "compile with Hugs")
-                    , (Flag UHC, ([] , ["uhc"]), "compile with UHC")])
+                    , (Flag UHC, ([] , ["uhc"]), "compile with UHC")
+
+                    -- "haskell-suite" compiler id string will be replaced
+                    -- by a more specific one during the configure stage
+                    , (Flag (HaskellSuite "haskell-suite"), ([] , ["haskell-suite"]),
+                        "compile with a haskell-suite compiler")])
 
       ,option "w" ["with-compiler"]
          "give the path to a particular compiler"
@@ -501,14 +509,24 @@ configureOptions showOrParseArgs =
          (reqArg "DEPENDENCY"
                  (readP_to_E (const "dependency expected") ((\x -> [x]) `fmap` parse))
                  (map (\x -> display x)))
+
+      ,option "" ["dependency"]
+         "A list of exact dependencies. E.g., --dependency=\"void=void-0.5.8-177d5cdf20962d0581fe2e4932a6c309\""
+         configDependencies (\v flags -> flags { configDependencies = v})
+         (reqArg "NAME=ID"
+                 (readP_to_E (const "dependency expected") ((\x -> [x]) `fmap` parseDependency))
+                 (map (\x -> display (fst x) ++ "=" ++ display (snd x))))
+
       ,option "" ["tests"]
          "dependency checking and compilation for test suites listed in the package description file."
          configTests (\v flags -> flags { configTests = v })
          (boolOpt [] [])
+
       ,option "" ["library-coverage"]
          "build library and test suites with Haskell Program Coverage enabled. (GHC only)"
          configLibCoverage (\v flags -> flags { configLibCoverage = v })
          (boolOpt [] [])
+
       ,option "" ["benchmarks"]
          "dependency checking and compilation for benchmarks listed in the package description file."
          configBenchmarks (\v flags -> flags { configBenchmarks = v })
@@ -544,6 +562,13 @@ configureOptions showOrParseArgs =
     reqPathTemplateArgFlag title _sf _lf d get set =
       reqArgFlag title _sf _lf d
         (fmap fromPathTemplate . get) (set . fmap toPathTemplate)
+
+parseDependency :: Parse.ReadP r (PackageName, InstalledPackageId)
+parseDependency = do
+  x <- parse
+  _ <- Parse.char '='
+  y <- parse
+  return (x, y)
 
 installDirsOptions :: [OptionField (InstallDirs (Flag PathTemplate))]
 installDirsOptions =
@@ -639,6 +664,7 @@ instance Monoid ConfigFlags where
     configStripExes     = mempty,
     configExtraLibDirs  = mempty,
     configConstraints   = mempty,
+    configDependencies  = mempty,
     configExtraIncludeDirs    = mempty,
     configConfigurationsFlags = mempty,
     configTests   = mempty,
@@ -673,6 +699,7 @@ instance Monoid ConfigFlags where
     configStripExes     = combine configStripExes,
     configExtraLibDirs  = combine configExtraLibDirs,
     configConstraints   = combine configConstraints,
+    configDependencies  = combine configDependencies,
     configExtraIncludeDirs    = combine configExtraIncludeDirs,
     configConfigurationsFlags = combine configConfigurationsFlags,
     configTests = combine configTests,
@@ -1329,6 +1356,7 @@ data BuildFlags = BuildFlags {
     buildProgramArgs :: [(String, [String])],
     buildDistPref    :: Flag FilePath,
     buildVerbosity   :: Flag Verbosity,
+    buildNumJobs     :: Flag (Maybe Int),
     -- TODO: this one should not be here, it's just that the silly
     -- UserHooks stop us from passing extra info in other ways
     buildArgs :: [String]
@@ -1345,6 +1373,7 @@ defaultBuildFlags  = BuildFlags {
     buildProgramArgs = [],
     buildDistPref    = Flag defaultDistPref,
     buildVerbosity   = Flag normal,
+    buildNumJobs     = mempty,
     buildArgs        = []
   }
 
@@ -1378,6 +1407,13 @@ buildOptions progConf showOrParseArgs =
   buildDistPref (\d flags -> flags { buildDistPref = d })
   showOrParseArgs
 
+  : option "j" ["jobs"]
+  "Run NUM jobs simultaneously (or '$ncpus' if no NUM is given)"
+  buildNumJobs (\v flags -> flags { buildNumJobs = v })
+  (optArg "NUM" (fmap Flag numJobsParser)
+   (Flag Nothing)
+   (map (Just . maybe "$ncpus" show) . flagToList))
+
   : programConfigurationPaths   progConf showOrParseArgs
   buildProgramPaths (\v flags -> flags { buildProgramPaths = v})
 
@@ -1396,6 +1432,7 @@ instance Monoid BuildFlags where
     buildProgramArgs = mempty,
     buildVerbosity   = mempty,
     buildDistPref    = mempty,
+    buildNumJobs     = mempty,
     buildArgs        = mempty
   }
   mappend a b = BuildFlags {
@@ -1403,6 +1440,7 @@ instance Monoid BuildFlags where
     buildProgramArgs = combine buildProgramArgs,
     buildVerbosity   = combine buildVerbosity,
     buildDistPref    = combine buildDistPref,
+    buildNumJobs     = combine buildNumJobs,
     buildArgs        = combine buildArgs
   }
     where combine field = field a `mappend` field b
@@ -1780,6 +1818,18 @@ programConfigurationOptions progConf showOrParseArgs get set =
         ("give extra options to " ++ prog)
         get set
         (reqArg' "OPTS" (\args -> [(prog, splitArgs args)]) (const []))
+
+-- | Common parser for the @-j@ flag of @build@ and @install@.
+numJobsParser :: ReadE (Maybe Int)
+numJobsParser = ReadE $ \s ->
+  case s of
+    "$ncpus" -> Right Nothing
+    _        -> case reads s of
+      [(n, "")]
+        | n < 1     -> Left "The number of jobs should be 1 or more."
+        | n > 64    -> Left "You probably don't want that many jobs."
+        | otherwise -> Right (Just n)
+      _             -> Left "The jobs value should be a number or '$ncpus'"
 
 -- ------------------------------------------------------------
 -- * GetOpt Utils

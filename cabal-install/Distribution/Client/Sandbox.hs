@@ -77,7 +77,7 @@ import Distribution.Simple.Program            ( ProgramConfiguration )
 import Distribution.Simple.Setup              ( Flag(..), HaddockFlags(..)
                                               , fromFlagOrDefault )
 import Distribution.Simple.SrcDist            ( prepareTree )
-import Distribution.Simple.Utils              ( die, debug, notice, warn
+import Distribution.Simple.Utils              ( die, debug, notice, info, warn
                                               , debugNoWrap, defaultPackageDesc
                                               , findPackageDesc
                                               , intercalate, topHandlerWith
@@ -482,9 +482,7 @@ loadConfigOrSandboxConfig verbosity globalFlags userInstallFlag = do
       sandboxConfigFileFlag = globalSandboxConfigFile globalFlags
 
   pkgEnvDir  <- getPkgEnvDir globalFlags
-  pkgEnvType <- case sandboxConfigFileFlag of
-    NoFlag -> classifyPackageEnvironment pkgEnvDir
-    Flag _ -> return SandboxPackageEnvironment
+  pkgEnvType <- classifyPackageEnvironment pkgEnvDir sandboxConfigFileFlag
 
   case pkgEnvType of
     -- A @cabal.sandbox.config@ file (and possibly @cabal.config@) is present.
@@ -611,9 +609,10 @@ withSandboxPackageInfo verbosity configFlags globalFlags
       modifiedDepsMap = M.fromList modifiedDeps
 
   assert (all (`S.member` allAddSourceDepsSet) modifiedAddSourceDeps) (return ())
-  unless (null modifiedDeps) $
-    notice verbosity $ "Some add-source dependencies have been modified. "
-                       ++ "They will be reinstalled..."
+  if (null modifiedDeps)
+    then info   verbosity $ "Found no modified add-source deps."
+    else notice verbosity $ "Some add-source dependencies have been modified. "
+                            ++ "They will be reinstalled..."
 
   -- Get the package ids of the remaining add-source deps (some are possibly not
   -- installed).
@@ -650,19 +649,16 @@ maybeReinstallAddSourceDeps :: Verbosity
                                -> ConfigFlags      -- ^ Saved configure flags
                                                    -- (from dist/setup-config)
                                -> GlobalFlags
-                               -> IO (UseSandbox, WereDepsReinstalled)
+                               -> IO (UseSandbox, SavedConfig
+                                     ,WereDepsReinstalled)
 maybeReinstallAddSourceDeps verbosity numJobsFlag configFlags' globalFlags' = do
-  currentDir <- getCurrentDirectory
-  pkgEnvType <- classifyPackageEnvironment currentDir
-  case pkgEnvType of
-    AmbientPackageEnvironment -> return (NoSandbox, NoDepsReinstalled)
-    UserPackageEnvironment    -> return (NoSandbox, NoDepsReinstalled)
-    SandboxPackageEnvironment -> do
-      (sandboxDir, pkgEnv)    <- tryLoadSandboxConfig verbosity globalFlags'
-
-      -- Actually reinstall the modified add-source deps.
-      let config         = pkgEnvSavedConfig pkgEnv
-          configFlags    = savedConfigureFlags config
+  (useSandbox, config) <- loadConfigOrSandboxConfig verbosity globalFlags'
+                          (configUserInstall configFlags')
+  case useSandbox of
+    NoSandbox             -> return (NoSandbox, config, NoDepsReinstalled)
+    UseSandbox sandboxDir -> do
+      -- Reinstall the modified add-source deps.
+      let configFlags    = savedConfigureFlags config
                            `mappendSomeSavedFlags`
                            configFlags'
           configExFlags  = defaultConfigExFlags
@@ -681,7 +677,7 @@ maybeReinstallAddSourceDeps verbosity numJobsFlag configFlags' globalFlags' = do
       depsReinstalled <- reinstallAddSourceDeps verbosity
                          configFlags configExFlags installFlags globalFlags
                          sandboxDir
-      return (UseSandbox sandboxDir, depsReinstalled)
+      return (UseSandbox sandboxDir, config, depsReinstalled)
 
   where
 

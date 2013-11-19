@@ -84,6 +84,7 @@ module Distribution.Simple.Utils (
         installDirectoryContents,
 
         -- * File permissions
+        doesExecutableExist,
         setFileOrdinary,
         setFileExecutable,
 
@@ -110,6 +111,7 @@ module Distribution.Simple.Utils (
 
         -- * modification time
         moreRecentFile,
+        existsAndIsMoreRecentThan,
 
         -- * temp files and dirs
         TempFileOptions(..), defaultTempFileOptions,
@@ -408,10 +410,10 @@ syncProcess fun c = do
   -- in the child (using SIG_DFL isn't really correct, it should be the
   -- original signal handler, but the GHC RTS will have already set up
   -- its own handler and we don't want to use that).
-  (_,_,_,p) <- Exception.bracket (installHandlers) (restoreHandlers) $
-               (\_ -> runGenProcess_ fun c
-                      (Just defaultSignal) (Just defaultSignal))
-  r <- waitForProcess p
+  r <- Exception.bracket (installHandlers) (restoreHandlers) $
+       (\_ -> do (_,_,_,p) <- runGenProcess_ fun c
+                              (Just defaultSignal) (Just defaultSignal)
+                 waitForProcess p)
   return r
     where
       installHandlers = do
@@ -730,7 +732,8 @@ getDirectoryContentsRecursive topdir = recurseDirectories [""]
       return (files ++ files')
 
       where
-        collect files dirs' []              = return (reverse files, reverse dirs')
+        collect files dirs' []              = return (reverse files
+                                                     ,reverse dirs')
         collect files dirs' (entry:entries) | ignore entry
                                             = collect files dirs' entries
         collect files dirs' (entry:entries) = do
@@ -809,6 +812,14 @@ moreRecentFile a b = do
     else do tb <- getModificationTime b
             ta <- getModificationTime a
             return (ta > tb)
+
+-- | Like 'moreRecentFile', but also checks that the first file exists.
+existsAndIsMoreRecentThan :: FilePath -> FilePath -> IO Bool
+existsAndIsMoreRecentThan a b = do
+  exists <- doesFileExist a
+  if not exists
+    then return False
+    else a `moreRecentFile` b
 
 ----------------------------------------
 -- Copying and installing files and dirs
@@ -970,6 +981,18 @@ installDirectoryContents verbosity srcDir destDir = do
   srcFiles <- getDirectoryContentsRecursive srcDir
   installOrdinaryFiles verbosity destDir [ (srcDir, f) | f <- srcFiles ]
 
+-------------------
+-- File permissions
+
+-- | Like 'doesFileExist', but also checks that the file is executable.
+doesExecutableExist :: FilePath -> IO Bool
+doesExecutableExist f = do
+  exists <- doesFileExist f
+  if exists
+    then do perms <- getPermissions f
+            return (executable perms)
+    else return False
+
 ---------------------------------
 -- Deprecated file copy functions
 
@@ -1082,6 +1105,7 @@ writeFileAtomic targetPath content = do
 -- the same as the existing content then leave the file as is so that we do not
 -- update the file's modification time.
 --
+-- NB: the file is assumed to be ASCII-encoded.
 rewriteFile :: FilePath -> String -> IO ()
 rewriteFile path newContent =
   flip catchIO mightNotExist $ do

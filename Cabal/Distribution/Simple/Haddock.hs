@@ -6,12 +6,12 @@
 -- Maintainer  :  cabal-devel@haskell.org
 -- Portability :  portable
 --
--- This module deals with the @haddock@ and @hscolour@ commands. Sadly this is
--- a rather complicated module. It deals with two versions of haddock (0.x and
--- 2.x). It has to do pre-processing for haddock 0.x which involves
--- \'unlit\'ing and using @-DHADDOCK@ for any source code that uses @cpp@. It
--- uses information about installed packages (from @ghc-pkg@) to find the
--- locations of documentation for dependent packages, so it can create links.
+-- This module deals with the @haddock@ and @hscolour@ commands. Sadly this is a
+-- rather complicated module. It deals with two versions of haddock (0.x and
+-- 2.x). It has to do pre-processing which involves \'unlit\'ing and using
+-- @-D__HADDOCK__@ for any source code that uses @cpp@. It uses information
+-- about installed packages (from @ghc-pkg@) to find the locations of
+-- documentation for dependent packages, so it can create links.
 --
 -- The @hscolour@ support allows generating html versions of the original
 -- source, with coloured syntax highlighting.
@@ -194,7 +194,7 @@ haddock pkg_descr lbi suffixes flags = do
               ++ "GHC version.\n"
               ++ "The GHC version is " ++ display ghcVersion ++ " but "
               ++ "haddock is using GHC version " ++ display haddockGhcVersion
-          where ghcVersion = compilerVersion (compiler lbi)
+          where ghcVersion = compilerVersion comp
 
     -- the tools match the requests, we can proceed
 
@@ -210,8 +210,8 @@ haddock pkg_descr lbi suffixes flags = do
             , fromPackageDescription pkg_descr ]
 
     let pre c = preprocessComponent pkg_descr c lbi False verbosity suffixes
-    withAllComponentsInBuildOrder pkg_descr lbi $ \comp clbi -> do
-      pre comp
+    withAllComponentsInBuildOrder pkg_descr lbi $ \component clbi -> do
+      pre component
       let
         doExe com = case (compToExe com) of
           Just exe -> do
@@ -219,23 +219,23 @@ haddock pkg_descr lbi suffixes flags = do
               let bi = buildInfo exe
               exeArgs  <- fromExecutable verbosity tmp lbi exe clbi htmlTemplate
               exeArgs' <- prepareSources verbosity tmp
-                            lbi isVersion2 bi (commonArgs `mappend` exeArgs)
-              runHaddock verbosity tmpFileOpts confHaddock exeArgs'
+                            lbi version bi (commonArgs `mappend` exeArgs)
+              runHaddock verbosity tmpFileOpts comp confHaddock exeArgs'
           Nothing -> do
            warn (fromFlag $ haddockVerbosity flags)
              "Unsupported component, skipping..."
            return ()
-      case comp of
+      case component of
         CLib lib -> do
           withTempDirectoryEx verbosity tmpFileOpts (buildDir lbi) "tmp" $ \tmp -> do
             let bi = libBuildInfo lib
             libArgs  <- fromLibrary verbosity tmp lbi lib clbi htmlTemplate
             libArgs' <- prepareSources verbosity tmp
-                          lbi isVersion2 bi (commonArgs `mappend` libArgs)
-            runHaddock verbosity tmpFileOpts confHaddock libArgs'
-        CExe   _ -> when (flag haddockExecutables) $ doExe comp
-        CTest  _ -> when (flag haddockTestSuites)  $ doExe comp
-        CBench _ -> when (flag haddockBenchmarks)  $ doExe comp
+                          lbi version bi (commonArgs `mappend` libArgs)
+            runHaddock verbosity tmpFileOpts comp confHaddock libArgs'
+        CExe   _ -> when (flag haddockExecutables) $ doExe component
+        CTest  _ -> when (flag haddockTestSuites)  $ doExe component
+        CBench _ -> when (flag haddockBenchmarks)  $ doExe component
 
     forM_ (extraDocFiles pkg_descr) $ \ fpath -> do
       files <- matchFileGlob fpath
@@ -243,6 +243,7 @@ haddock pkg_descr lbi suffixes flags = do
   where
     verbosity     = flag haddockVerbosity
     keepTempFiles = flag haddockKeepTempFiles
+    comp          = compiler lbi
     tmpFileOpts   = defaultTempFileOptions { optKeepTempFiles = keepTempFiles }
     flag f        = fromFlag $ f flags
     htmlTemplate  = fmap toPathTemplate . flagToMaybe . haddockHtmlLocation $ flags
@@ -252,11 +253,11 @@ haddock pkg_descr lbi suffixes flags = do
 prepareSources :: Verbosity
                   -> FilePath
                   -> LocalBuildInfo
-                  -> Bool            -- haddock >= 2.0
+                  -> Version
                   -> BuildInfo
                   -> HaddockArgs
                   -> IO HaddockArgs
-prepareSources verbosity tmp lbi isVersion2 bi args@HaddockArgs{argTargets=files} =
+prepareSources verbosity tmp lbi haddockVersion bi args@HaddockArgs{argTargets=files} =
               mapM (mockPP tmp) files >>= \targets -> return args {argTargets=targets}
           where
             mockPP pref file = do
@@ -282,9 +283,14 @@ prepareSources verbosity tmp lbi isVersion2 bi args@HaddockArgs{argTargets=files
                      removeFile targetFile
 
                  return hsFile
-            needsCpp = EnableExtension CPP `elem` allExtensions bi
-            defines | isVersion2 = []
-                    | otherwise  = ["-D__HADDOCK__"]
+            needsCpp             = EnableExtension CPP `elem` allExtensions bi
+            isVersion2           = haddockVersion >= Version [2,0] []
+            defines | isVersion2 = [haddockVersionMacro]
+                    | otherwise  = ["-D__HADDOCK__", haddockVersionMacro]
+            haddockVersionMacro  = "-D__HADDOCK_VERSION__="
+                                   ++ show (v1 * 1000 + v2 * 10 + v3)
+              where
+                [v1, v2, v3] = take 3 $ versionBranch haddockVersion ++ [0,0]
 
 --------------------------------------------------------------------------------------------------
 -- constributions to HaddockArgs
@@ -445,13 +451,15 @@ getGhcLibDir verbosity lbi isVersion2
 -- | Call haddock with the specified arguments.
 runHaddock :: Verbosity
               -> TempFileOptions
+              -> Compiler
               -> ConfiguredProgram
               -> HaddockArgs
               -> IO ()
-runHaddock verbosity tmpFileOpts confHaddock args = do
+runHaddock verbosity tmpFileOpts comp confHaddock args = do
   let haddockVersion = fromMaybe (error "unable to determine haddock version")
                        (programVersion confHaddock)
-  renderArgs verbosity tmpFileOpts haddockVersion args $ \(flags,result)-> do
+  renderArgs verbosity tmpFileOpts haddockVersion comp args $
+    \(flags,result)-> do
 
       rawSystemProgram verbosity confHaddock flags
 
@@ -461,17 +469,18 @@ runHaddock verbosity tmpFileOpts confHaddock args = do
 renderArgs :: Verbosity
               -> TempFileOptions
               -> Version
+              -> Compiler
               -> HaddockArgs
               -> (([String], FilePath) -> IO a)
               -> IO a
-renderArgs verbosity tmpFileOpts version args k = do
+renderArgs verbosity tmpFileOpts version comp args k = do
   createDirectoryIfMissingVerbose verbosity True outputDir
   withTempFileEx tmpFileOpts outputDir "haddock-prolog.txt" $ \prologFileName h -> do
           do
              hPutStrLn h $ fromFlag $ argPrologue args
              hClose h
              let pflag = "--prologue=" ++ prologFileName
-             k (pflag : renderPureArgs version args, result)
+             k (pflag : renderPureArgs version comp args, result)
     where
       isVersion2 = version >= Version [2,0] []
       outputDir = (unDir $ argOutputDir args)
@@ -487,8 +496,8 @@ renderArgs verbosity tmpFileOpts version args k = do
               pkgid = arg argPackageName
       arg f = fromFlag $ f args
 
-renderPureArgs :: Version -> HaddockArgs -> [String]
-renderPureArgs version args = concat
+renderPureArgs :: Version -> Compiler -> HaddockArgs -> [String]
+renderPureArgs version comp args = concat
     [
      (:[]) . (\f -> "--dump-interface="++ unDir (argOutputDir args) </> f)
      . fromFlag . argInterfaceFile $ args,
@@ -508,8 +517,8 @@ renderPureArgs version args = concat
      (:[]).("--title="++) . (bool (++" (internal documentation)") id (getAny $ argIgnoreExports args))
               . fromFlag . argTitle $ args,
      [ "--optghc=" ++ opt | isVersion2
-                          , (opts, ghcVersion) <- flagToList (argGhcOptions args)
-                          , opt <- renderGhcOptions ghcVersion opts ],
+                          , (opts, _ghcVer) <- flagToList (argGhcOptions args)
+                          , opt <- renderGhcOptions comp opts ],
      maybe [] (\l -> ["-B"++l]) $ guard isVersion2 >> flagToMaybe (argGhcLibDir args), -- error if isVersion2 and Nothing?
      argTargets $ args
     ]

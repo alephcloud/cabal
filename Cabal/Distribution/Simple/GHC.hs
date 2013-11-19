@@ -105,13 +105,16 @@ import Distribution.Simple.Program
          , requireProgramVersion, requireProgram
          , userMaybeSpecifyPath, programPath, lookupProgram, addKnownProgram
          , ghcProgram, ghcPkgProgram, hsc2hsProgram
-         , arProgram, ranlibProgram, ldProgram
+         , arProgram, ldProgram
          , gccProgram, stripProgram )
 import qualified Distribution.Simple.Program.HcPkg as HcPkg
 import qualified Distribution.Simple.Program.Ar    as Ar
 import qualified Distribution.Simple.Program.Ld    as Ld
 import Distribution.Simple.Program.GHC
-import Distribution.Simple.Setup (toFlag, fromFlag)
+import Distribution.Simple.Setup
+         ( toFlag, fromFlag, fromFlagOrDefault )
+import qualified Distribution.Simple.Setup as Cabal
+        ( Flag )
 import Distribution.Simple.Compiler
          ( CompilerFlavor(..), CompilerId(..), Compiler(..), compilerVersion
          , OptimisationLevel(..), PackageDB(..), PackageDBStack
@@ -129,11 +132,11 @@ import Language.Haskell.Extension (Language(..), Extension(..)
 import Control.Monad            ( unless, when )
 import Data.Char                ( isSpace )
 import Data.List
-import Data.Maybe               ( catMaybes, fromMaybe )
+import qualified Data.Map as M  ( Map, fromList, lookup )
+import Data.Maybe               ( catMaybes, fromMaybe, maybeToList )
 import Data.Monoid              ( Monoid(..) )
 import System.Directory
-         ( removeFile, getDirectoryContents, doesFileExist
-         , getTemporaryDirectory )
+         ( getDirectoryContents, doesFileExist, getTemporaryDirectory )
 import System.FilePath          ( (</>), (<.>), takeExtension,
                                   takeDirectory, replaceExtension,
                                   splitExtension )
@@ -180,14 +183,16 @@ configure verbosity hcPath hcPkgPath conf0 = do
   extensions <- getExtensions verbosity ghcProg
 
   ghcInfo <- getGhcInfo verbosity ghcProg
+  let ghcInfoMap = M.fromList ghcInfo
 
   let comp = Compiler {
-        compilerId             = CompilerId GHC ghcVersion,
-        compilerLanguages      = languages,
-        compilerExtensions     = extensions
+        compilerId         = CompilerId GHC ghcVersion,
+        compilerLanguages  = languages,
+        compilerExtensions = extensions,
+        compilerProperties = ghcInfoMap
       }
       compPlatform = targetPlatform ghcInfo
-      conf4 = configureToolchain ghcProg ghcInfo conf3 -- configure gcc and ld
+      conf4 = configureToolchain ghcProg ghcInfoMap conf3 -- configure gcc and ld
   return (comp, compPlatform, conf4)
 
 targetPlatform :: [(String, String)] -> Maybe Platform
@@ -264,7 +269,7 @@ guessHsc2hsFromGhcPath = guessToolFromGhcPath hsc2hsProgram
 
 -- | Adjust the way we find and configure gcc and ld
 --
-configureToolchain :: ConfiguredProgram -> [(String, String)]
+configureToolchain :: ConfiguredProgram -> M.Map String String
                                         -> ProgramConfiguration
                                         -> ProgramConfiguration
 configureToolchain ghcProg ghcInfo =
@@ -292,34 +297,50 @@ configureToolchain ghcProg ghcInfo =
     isWindows   = case buildOS of Windows -> True; _ -> False
     binPrefix   = ""
 
-    -- on Windows finding and configuring ghc's gcc & binutils is a bit special
-    extraGccPath
-      | ghcVersion >= Version [6,12] [] = mingwBinDir </> binPrefix ++ "gcc.exe"
-      | otherwise                       = baseDir     </> "gcc.exe"
-    extraLdPath
-      | ghcVersion >= Version [6,12] [] = mingwBinDir </> binPrefix ++ "ld.exe"
-      | otherwise                       = libDir      </> "ld.exe"
-    extraArPath
-      | ghcVersion >= Version [6,12] [] = mingwBinDir </> binPrefix ++ "ar.exe"
-      | otherwise                       = libDir      </> "ar.exe"
-    extraStripPath
-      | ghcVersion >= Version [6,12] [] = mingwBinDir </> binPrefix ++
-                                          "strip.exe"
-      | otherwise                       = libDir      </> "strip.exe"
+    mkExtraPath :: Maybe FilePath -> FilePath -> [FilePath]
+    mkExtraPath mbPath mingwPath | isWindows = mbDir ++ [mingwPath]
+                                 | otherwise = mbDir
+      where
+        mbDir = maybeToList . fmap takeDirectory $ mbPath
 
-    findProg :: Program -> FilePath
+    extraGccPath   = mkExtraPath mbGccLocation   windowsExtraGccDir
+    extraLdPath    = mkExtraPath mbLdLocation    windowsExtraLdDir
+    extraArPath    = mkExtraPath mbArLocation    windowsExtraArDir
+    extraStripPath = mkExtraPath mbStripLocation windowsExtraStripDir
+
+    -- on Windows finding and configuring ghc's gcc & binutils is a bit special
+    windowsExtraGccDir
+      | ghcVersion >= Version [6,12] [] = mingwBinDir </> binPrefix
+      | otherwise                       = baseDir
+    windowsExtraLdDir
+      | ghcVersion >= Version [6,12] [] = mingwBinDir </> binPrefix
+      | otherwise                       = libDir
+    windowsExtraArDir
+      | ghcVersion >= Version [6,12] [] = mingwBinDir </> binPrefix
+      | otherwise                       = libDir
+    windowsExtraStripDir
+      | ghcVersion >= Version [6,12] [] = mingwBinDir </> binPrefix
+      | otherwise                       = libDir
+
+    findProg :: Program -> [FilePath]
              -> Verbosity -> ProgramSearchPath -> IO (Maybe FilePath)
     findProg prog extraPath v searchpath =
         programFindLocation prog v searchpath'
       where
-        searchpath' | isWindows = ProgramSearchPathDir extraPath : searchpath
-                    | otherwise = searchpath
+        searchpath' = (map ProgramSearchPathDir extraPath) ++ searchpath
+
+    -- Read tool locations from the 'ghc --info' output. Useful when
+    -- cross-compiling.
+    mbGccLocation   = M.lookup "C compiler command" ghcInfo
+    mbLdLocation    = M.lookup "ld command" ghcInfo
+    mbArLocation    = M.lookup "ar command" ghcInfo
+    mbStripLocation = M.lookup "strip command" ghcInfo
 
     ccFlags        = getFlags "C compiler flags"
     gccLinkerFlags = getFlags "Gcc Linker flags"
     ldLinkerFlags  = getFlags "Ld Linker flags"
 
-    getFlags key = case lookup key ghcInfo of
+    getFlags key = case M.lookup key ghcInfo of
                    Nothing -> []
                    Just flags ->
                        case reads flags of
@@ -662,22 +683,23 @@ substTopDir topDir ipo
 
 -- | Build a library with GHC.
 --
-buildLib, replLib :: Verbosity
+buildLib, replLib :: Verbosity          -> Cabal.Flag (Maybe Int)
                   -> PackageDescription -> LocalBuildInfo
                   -> Library            -> ComponentLocalBuildInfo -> IO ()
 buildLib = buildOrReplLib False
 replLib  = buildOrReplLib True
 
-buildOrReplLib :: Bool -> Verbosity
+buildOrReplLib :: Bool -> Verbosity  -> Cabal.Flag (Maybe Int)
                -> PackageDescription -> LocalBuildInfo
                -> Library            -> ComponentLocalBuildInfo -> IO ()
-buildOrReplLib forRepl verbosity pkg_descr lbi lib clbi = do
+buildOrReplLib forRepl verbosity numJobsFlag pkg_descr lbi lib clbi = do
   libName <- case componentLibraries clbi of
              [libName] -> return libName
              [] -> die "No library name found when building library"
              _  -> die "Multiple library names found when building library"
 
   let libTargetDir = buildDir lbi
+      numJobs = fromMaybe 1 $ fromFlagOrDefault Nothing numJobsFlag
       pkgid = packageId pkg_descr
       whenVanillaLib forceVanilla =
         when (not forRepl && (forceVanilla || withVanillaLib lbi))
@@ -690,14 +712,14 @@ buildOrReplLib forRepl verbosity pkg_descr lbi lib clbi = do
       ghcVersion = compilerVersion comp
 
   (ghcProg, _) <- requireProgram verbosity ghcProgram (withPrograms lbi)
-  let runGhcProg = runGHC verbosity ghcProg
+  let runGhcProg = runGHC verbosity ghcProg comp
 
   libBi <- hackThreadedFlag verbosity
              comp (withProfLib lbi) (libBuildInfo lib)
 
-  isGhcDynamic <- ghcDynamic verbosity ghcProg
-  dynamicTooSupported <- ghcSupportsDynamicToo verbosity ghcProg
-  let doingTH = EnableExtension TemplateHaskell `elem` allExtensions libBi
+  let isGhcDynamic        = ghcDynamic comp
+      dynamicTooSupported = ghcSupportsDynamicToo comp
+      doingTH = EnableExtension TemplateHaskell `elem` allExtensions libBi
       forceVanillaLib = doingTH && not isGhcDynamic
       forceSharedLib  = doingTH &&     isGhcDynamic
       -- TH always needs default libs, even when building for profiling
@@ -709,6 +731,7 @@ buildOrReplLib forRepl verbosity pkg_descr lbi lib clbi = do
       baseOpts    = componentGhcOptions verbosity lbi libBi clbi libTargetDir
       vanillaOpts = baseOpts `mappend` mempty {
                       ghcOptMode         = toFlag GhcModeMake,
+                      ghcOptNumJobs      = toFlag numJobs,
                       ghcOptPackageName  = toFlag pkgid,
                       ghcOptInputModules = libModules lib
                     }
@@ -736,7 +759,8 @@ buildOrReplLib forRepl verbosity pkg_descr lbi lib clbi = do
                    }
       replOpts    = vanillaOpts {
                       ghcOptExtra        = filterGhciFlags
-                                           (ghcOptExtra vanillaOpts)
+                                           (ghcOptExtra vanillaOpts),
+                      ghcOptNumJobs      = mempty
                     }
                     `mappend` linkerOpts
                     `mappend` mempty {
@@ -836,11 +860,6 @@ buildOrReplLib forRepl verbosity pkg_descr lbi lib clbi = do
             else return []
 
   unless (null hObjs && null cObjs && null stubObjs) $ do
-    -- first remove library files if they exists
-    unless forRepl $ sequence_
-      [ removeFile libFilePath `catchIO` \_ -> return ()
-      | libFilePath <- [vanillaLibFilePath, profileLibFilePath
-                       ,sharedLibFilePath,  ghciLibFilePath] ]
 
     let staticObjectFiles =
                hObjs
@@ -901,23 +920,26 @@ buildOrReplLib forRepl verbosity pkg_descr lbi lib clbi = do
 
 -- | Build an executable with GHC.
 --
-buildExe, replExe :: Verbosity
+buildExe, replExe :: Verbosity          -> Cabal.Flag (Maybe Int)
                   -> PackageDescription -> LocalBuildInfo
                   -> Executable         -> ComponentLocalBuildInfo -> IO ()
 buildExe = buildOrReplExe False
 replExe  = buildOrReplExe True
 
-buildOrReplExe :: Bool -> Verbosity
+buildOrReplExe :: Bool -> Verbosity  -> Cabal.Flag (Maybe Int)
                -> PackageDescription -> LocalBuildInfo
                -> Executable         -> ComponentLocalBuildInfo -> IO ()
-buildOrReplExe forRepl verbosity _pkg_descr lbi
+buildOrReplExe forRepl verbosity numJobsFlag _pkg_descr lbi
   exe@Executable { exeName = exeName', modulePath = modPath } clbi = do
 
   (ghcProg, _) <- requireProgram verbosity ghcProgram (withPrograms lbi)
-  let runGhcProg = runGHC verbosity ghcProg
+  let comp       = compiler lbi
+      numJobs    = fromMaybe 1 $
+                   fromFlagOrDefault Nothing numJobsFlag
+      runGhcProg = runGHC verbosity ghcProg comp
 
   exeBi <- hackThreadedFlag verbosity
-             (compiler lbi) (withProfExe lbi) (buildInfo exe)
+             comp (withProfExe lbi) (buildInfo exe)
 
   -- exeNameReal, the name that GHC really uses (with .exe on Windows)
   let exeNameReal = exeName' <.>
@@ -935,10 +957,9 @@ buildOrReplExe forRepl verbosity _pkg_descr lbi
   -- build executables
 
   srcMainFile         <- findFile (exeDir : hsSourceDirs exeBi) modPath
-  isGhcDynamic        <- ghcDynamic verbosity ghcProg
-  dynamicTooSupported <- ghcSupportsDynamicToo verbosity ghcProg
-
-  let isHaskellMain = elem (takeExtension srcMainFile) [".hs", ".lhs"]
+  let isGhcDynamic        = ghcDynamic comp
+      dynamicTooSupported = ghcSupportsDynamicToo comp
+      isHaskellMain = elem (takeExtension srcMainFile) [".hs", ".lhs"]
       cSrcs         = cSources exeBi ++ [srcMainFile | not isHaskellMain]
       cObjs         = map (`replaceExtension` objExtension) cSrcs
       baseOpts   = (componentGhcOptions verbosity lbi exeBi clbi exeDir)
@@ -1023,10 +1044,12 @@ buildOrReplExe forRepl verbosity _pkg_descr lbi
 
   -- Build static/dynamic object files for TH, if needed.
   when compileForTH $
-    runGhcProg compileTHOpts { ghcOptNoLink = toFlag True }
+    runGhcProg compileTHOpts { ghcOptNoLink  = toFlag True
+                             , ghcOptNumJobs = toFlag numJobs }
 
   unless forRepl $
-    runGhcProg compileOpts { ghcOptNoLink = toFlag True }
+    runGhcProg compileOpts { ghcOptNoLink  = toFlag True
+                           , ghcOptNumJobs = toFlag numJobs }
 
   -- build any C sources
   unless (null cSrcs) $ do
@@ -1115,6 +1138,7 @@ libAbiHash verbosity pkg_descr lbi lib clbi = do
   libBi <- hackThreadedFlag verbosity
              (compiler lbi) (withProfLib lbi) (libBuildInfo lib)
   let
+      comp        = compiler lbi
       vanillaArgs =
         (componentGhcOptions verbosity lbi libBi clbi (buildDir lbi))
         `mappend` mempty {
@@ -1141,7 +1165,7 @@ libAbiHash verbosity pkg_descr lbi lib clbi = do
            else error "libAbiHash: Can't find an enabled library way"
   --
   (ghcProg, _) <- requireProgram verbosity ghcProgram (withPrograms lbi)
-  getProgramInvocationOutput verbosity (ghcInvocation ghcProg ghcArgs)
+  getProgramInvocationOutput verbosity (ghcInvocation ghcProg comp ghcArgs)
 
 
 componentGhcOptions :: Verbosity -> LocalBuildInfo
@@ -1280,12 +1304,6 @@ installLib verbosity lbi targetDir dynlibTargetDir builtDir _pkg lib clbi = do
   whenGHCi    $ mapM_ (copy builtDir targetDir)             ghciLibNames
   whenShared  $ mapM_ (copyShared builtDir dynlibTargetDir) sharedLibNames
 
-  -- run ranlib if necessary:
-  whenVanilla $ mapM_ (updateLibArchive verbosity lbi . (targetDir </>))
-                      vanillaLibNames
-  whenProf    $ mapM_ (updateLibArchive verbosity lbi . (targetDir </>))
-                      profileLibNames
-
   where
     cid = compilerId (compiler lbi)
     libNames = componentLibraries clbi
@@ -1300,18 +1318,6 @@ installLib verbosity lbi targetDir dynlibTargetDir builtDir _pkg lib clbi = do
     whenProf    = when (hasLib && withProfLib    lbi)
     whenGHCi    = when (hasLib && withGHCiLib    lbi)
     whenShared  = when (hasLib && withSharedLib  lbi)
-
--- | On MacOS X we have to call @ranlib@ to regenerate the archive index after
--- copying. This is because the silly MacOS X linker checks that the archive
--- index is not older than the file itself, which means simply
--- copying/installing the file breaks it!!
---
-updateLibArchive :: Verbosity -> LocalBuildInfo -> FilePath -> IO ()
-updateLibArchive verbosity lbi path
-  | buildOS == OSX = do
-    (ranlib, _) <- requireProgram verbosity ranlibProgram (withPrograms lbi)
-    rawSystemProgram verbosity ranlib [path]
-  | otherwise = return ()
 
 -- -----------------------------------------------------------------------------
 -- Registering
@@ -1346,16 +1352,14 @@ registerPackage verbosity installedPkgInfo _pkg lbi _inplace packageDbs = do
 -- -----------------------------------------------------------------------------
 -- Utils
 
-ghcDynamic :: Verbosity -> ConfiguredProgram -> IO Bool
-ghcDynamic verbosity ghcProg
-    = do xs <- getGhcInfo verbosity ghcProg
-         return $ case lookup "GHC Dynamic" xs of
-                  Just "YES" -> True
-                  _          -> False
+ghcLookupProperty :: String -> Compiler -> Bool
+ghcLookupProperty prop comp =
+  case M.lookup prop (compilerProperties comp) of
+    Just "YES" -> True
+    _          -> False
 
-ghcSupportsDynamicToo :: Verbosity -> ConfiguredProgram -> IO Bool
-ghcSupportsDynamicToo verbosity ghcProg
-    = do xs <- getGhcInfo verbosity ghcProg
-         return $ case lookup "Support dynamic-too" xs of
-                  Just "YES" -> True
-                  _          -> False
+ghcDynamic :: Compiler -> Bool
+ghcDynamic = ghcLookupProperty "GHC Dynamic"
+
+ghcSupportsDynamicToo :: Compiler -> Bool
+ghcSupportsDynamicToo = ghcLookupProperty "Support dynamic-too"
