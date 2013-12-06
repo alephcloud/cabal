@@ -56,6 +56,8 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE. -}
 
+{-# LANGUAGE CPP #-}
+
 module Distribution.Simple.Setup (
 
   GlobalFlags(..),   emptyGlobalFlags,   defaultGlobalFlags,   globalCommand,
@@ -338,7 +340,12 @@ defaultConfigFlags progConf = emptyConfigFlags {
     configDistPref     = Flag defaultDistPref,
     configVerbosity    = Flag normal,
     configUserInstall  = Flag False,           --TODO: reverse this
+#if defined(mingw32_HOST_OS)
+    -- See #1589.
+    configGHCiLib      = Flag True,
+#else
     configGHCiLib      = Flag False,
+#endif
     configSplitObjs    = Flag False, -- takes longer, so turn off by default
     configStripExes    = Flag True,
     configTests        = Flag False,
