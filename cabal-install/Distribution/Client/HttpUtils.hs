@@ -40,7 +40,7 @@ import System.FilePath
 import System.Directory
          ( doesFileExist )
 
-import Control.Concurrent ( newMVar, MVar, modifyMVar )
+import Control.Concurrent ( newMVar, MVar, modifyMVar, modifyMVar_ )
 import Control.Exception ( bracket )
 import Control.Monad ( when )
 import Control.Monad.IO.Class ( MonadIO, liftIO )
@@ -178,6 +178,7 @@ doHTTP _verbosity uri req = withSocketsDo $ do
           then do
             username <- liftM B8.pack $ promptUsername realm
             password <- liftM B8.pack $ promptPassword realm
+            liftIO $ modifyMVar_ pwdCache $ return . M.insert uriAuth (username, password)
             requestWithAuth username password manager
           else
             return $ responseToResponse res
