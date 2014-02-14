@@ -30,7 +30,9 @@ module Distribution.Client.Config (
     commentSavedConfig,
     initialSavedConfig,
     configFieldDescriptions,
-    installDirsFields
+    installDirsFields,
+    withProgramsFields,
+    withProgramOptionsFields
   ) where
 
 
@@ -39,7 +41,7 @@ import Distribution.Client.Types
 import Distribution.Client.BuildReports.Types
          ( ReportLevel(..) )
 import Distribution.Client.Setup
-         ( GlobalFlags(..), globalCommand
+         ( GlobalFlags(..), globalCommand, defaultGlobalFlags
          , ConfigExFlags(..), configureExOptions, defaultConfigExFlags
          , InstallFlags(..), installOptions, defaultInstallFlags
          , UploadFlags(..), uploadCommand
@@ -348,7 +350,7 @@ commentSavedConfig = do
   userInstallDirs   <- defaultInstallDirs defaultCompiler True True
   globalInstallDirs <- defaultInstallDirs defaultCompiler False True
   return SavedConfig {
-    savedGlobalFlags       = commandDefaultFlags globalCommand,
+    savedGlobalFlags       = defaultGlobalFlags,
     savedInstallFlags      = defaultInstallFlags,
     savedConfigureExFlags  = defaultConfigExFlags,
     savedConfigureFlags    = (defaultConfigFlags defaultProgramConfiguration) {
@@ -534,7 +536,7 @@ parseConfig initial = \str -> do
       | name' == "global" = do g' <- parseFields installDirsFields g fs
                                return (u, g', p, a)
       | otherwise         = do
-          warning "The install-paths section should be for 'user' or 'global'"
+          warning "The 'install-paths' section should be for 'user' or 'global'"
           return accum
       where name' = lowercase name
     parseSections accum@(u,g,p,a)

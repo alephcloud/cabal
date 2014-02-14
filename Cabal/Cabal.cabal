@@ -1,5 +1,5 @@
 name: Cabal
-version: 1.19.1
+version: 1.19.2
 copyright: 2003-2006, Isaac Jones
            2005-2011, Duncan Coutts
 license: BSD3
@@ -190,6 +190,7 @@ library
     Distribution.Simple.Program.Ld
     Distribution.Simple.Program.Run
     Distribution.Simple.Program.Script
+    Distribution.Simple.Program.Strip
     Distribution.Simple.Program.Types
     Distribution.Simple.Register
     Distribution.Simple.Setup

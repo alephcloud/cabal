@@ -123,9 +123,24 @@ pkgDescrFieldDescrs =
  , simpleField "license"
            disp                   parseLicenseQ
            license                (\l pkg -> pkg{license=l})
+   -- We have both 'license-file' and 'license-files' fields.
+   -- Rather than declaring license-file to be deprecated, we will continue
+   -- to allow both. The 'license-file' will continue to only allow single
+   -- tokens, while 'license-files' allows multiple. On pretty-printing, we
+   -- will use 'license-file' if there's just one, and use 'license-files'
+   -- otherwise.
  , simpleField "license-file"
            showFilePath           parseFilePathQ
-           licenseFile            (\l pkg -> pkg{licenseFile=l})
+           (\pkg -> case licenseFiles pkg of
+                      [x] -> x
+                      _   -> "")
+           (\l pkg -> pkg{licenseFiles=licenseFiles pkg ++ [l]})
+ , listField "license-files"
+           showFilePath           parseFilePathQ
+           (\pkg -> case licenseFiles pkg of
+                      [_] -> []
+                      xs  -> xs)
+           (\ls pkg -> pkg{licenseFiles=ls})
  , simpleField "copyright"
            showFreeText           parseFreeText
            copyright              (\val pkg -> pkg{copyright=val})
@@ -992,9 +1007,14 @@ parsePackageDescription file = do
             lift $ warning $ "Ignoring unknown section type: " ++ sec_type
             skipField
             getBody
-      Just f -> do
+      Just f@(F {}) -> do
             _ <- lift $ syntaxError (lineNo f) $
-              "Construct not supported at this position: " ++ show f
+              "Plain fields are not allowed in between stanzas: " ++ show f
+            skipField
+            getBody
+      Just f@(IfBlock {}) -> do
+            _ <- lift $ syntaxError (lineNo f) $
+              "If-blocks are not allowed in between stanzas: " ++ show f
             skipField
             getBody
       Nothing -> return ([], [], Nothing, [], [], [])

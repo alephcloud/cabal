@@ -6,21 +6,6 @@
 
 module Main where
 
-import Data.Version (Version(Version))
-import Distribution.Simple.LocalBuildInfo (LocalBuildInfo(..))
-import Distribution.Simple.Program.Types (programPath)
-import Distribution.Simple.Program.Builtin (ghcProgram, ghcPkgProgram)
-import Distribution.Simple.Program.Db (requireProgram)
-import Distribution.Simple.Utils (cabalVersion, die, withFileContents)
-import Distribution.Text (display)
-import Distribution.Verbosity (normal)
-import System.Directory (doesFileExist, getCurrentDirectory,
-                         setCurrentDirectory)
-import System.FilePath ((</>))
-import Test.Framework (Test, TestName, defaultMain, testGroup)
-import Test.Framework.Providers.HUnit (hUnitTestToTests)
-import qualified Test.HUnit as HUnit
-
 import PackageTests.BenchmarkExeV10.Check
 import PackageTests.BenchmarkOptions.Check
 import PackageTests.BenchmarkStanza.Check
@@ -48,6 +33,26 @@ import PackageTests.TestOptions.Check
 import PackageTests.TestStanza.Check
 import PackageTests.TestSuiteExeV10.Check
 import PackageTests.OrderFlags.Check
+
+import Distribution.Compat.Exception (catchIO)
+import Distribution.Simple.LocalBuildInfo (LocalBuildInfo(..))
+import Distribution.Simple.Program.Types (programPath)
+import Distribution.Simple.Program.Builtin (ghcProgram, ghcPkgProgram)
+import Distribution.Simple.Program.Db (requireProgram)
+import Distribution.Simple.Utils (cabalVersion, die, withFileContents)
+import Distribution.Text (display)
+import Distribution.Verbosity (normal)
+import Distribution.Version (Version(Version))
+
+import Data.Maybe (isJust)
+import System.Directory (doesFileExist, getCurrentDirectory,
+                         setCurrentDirectory)
+import System.Environment (getEnv)
+import System.FilePath ((</>))
+import Test.Framework (Test, TestName, defaultMain, testGroup)
+import Test.Framework.Providers.HUnit (hUnitTestToTests)
+import qualified Test.HUnit as HUnit
+
 
 hunit :: TestName -> HUnit.Test -> Test
 hunit name test = testGroup name $ hUnitTestToTests test
@@ -82,8 +87,6 @@ tests version inplaceSpec ghcPath ghcPkgPath =
       (PackageTests.TemplateHaskell.Check.vanilla ghcPath)
     , hunit "TemplateHaskell/profiling"
       (PackageTests.TemplateHaskell.Check.profiling ghcPath)
-    , hunit "TemplateHaskell/dynamic"
-      (PackageTests.TemplateHaskell.Check.dynamic ghcPath)
     , hunit "PathsModule/Executable"
       (PackageTests.PathsModule.Executable.Check.suite ghcPath)
     , hunit "PathsModule/Library" (PackageTests.PathsModule.Library.Check.suite ghcPath)
@@ -95,6 +98,8 @@ tests version inplaceSpec ghcPath ghcPkgPath =
       (PackageTests.BuildTestSuiteDetailedV09.Check.suite inplaceSpec ghcPath)
     , hunit "OrderFlags"
       (PackageTests.OrderFlags.Check.suite ghcPath)
+    , hunit "TemplateHaskell/dynamic"
+      (PackageTests.TemplateHaskell.Check.dynamic ghcPath)
     ] ++
     -- These tests are only required to pass on cabal version >= 1.7
     (if version >= Version [1, 7] []

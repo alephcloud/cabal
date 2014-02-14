@@ -11,7 +11,7 @@
 --
 -----------------------------------------------------------------------------
 module Distribution.Client.Setup
-    ( globalCommand, GlobalFlags(..), globalRepos
+    ( globalCommand, GlobalFlags(..), defaultGlobalFlags, globalRepos
     , configureCommand, ConfigFlags(..), filterConfigureFlags
     , configureExCommand, ConfigExFlags(..), defaultConfigExFlags
                         , configureExOptions
@@ -23,6 +23,7 @@ module Distribution.Client.Setup
     , upgradeCommand
     , infoCommand, InfoFlags(..)
     , fetchCommand, FetchFlags(..)
+    , freezeCommand, FreezeFlags(..)
     , getCommand, unpackCommand, GetFlags(..)
     , checkCommand
     , uploadCommand, UploadFlags(..)
@@ -44,7 +45,7 @@ import Distribution.Client.Types
 import Distribution.Client.BuildReports.Types
          ( ReportLevel(..) )
 import Distribution.Client.Dependency.Types
-         ( PreSolver(..) )
+         ( AllowNewer(..), PreSolver(..) )
 import qualified Distribution.Client.Init.Types as IT
          ( InitFlags(..), PackageType(..) )
 import Distribution.Client.Targets
@@ -53,14 +54,15 @@ import Distribution.Client.Targets
 import Distribution.Simple.Compiler (PackageDB)
 import Distribution.Simple.Program
          ( defaultProgramConfiguration )
-import Distribution.Simple.Command hiding (boolOpt)
+import Distribution.Simple.Command hiding (boolOpt, boolOpt')
+import qualified Distribution.Simple.Command as Command
 import qualified Distribution.Simple.Setup as Cabal
 import Distribution.Simple.Setup
          ( ConfigFlags(..), BuildFlags(..), TestFlags(..), BenchmarkFlags(..)
          , SDistFlags(..), HaddockFlags(..)
          , readPackageDbList, showPackageDbList
          , Flag(..), toFlag, fromFlag, flagToMaybe, flagToList
-         , optionVerbosity, boolOpt, trueArg, falseArg, numJobsParser )
+         , optionVerbosity, boolOpt, boolOpt', trueArg, falseArg, optionNumJobs )
 import Distribution.Simple.InstallDirs
          ( PathTemplate, InstallDirs(sysconfdir)
          , toPathTemplate, fromPathTemplate )
@@ -75,7 +77,7 @@ import Distribution.Text
 import Distribution.ReadE
          ( ReadE(..), readP_to_E, succeedReadE )
 import qualified Distribution.Compat.ReadP as Parse
-         ( ReadP, readP_to_S, readS_to_P, char, munch1, pfail, (+++) )
+         ( ReadP, readP_to_S, readS_to_P, char, munch1, pfail, sepBy1, (+++) )
 import Distribution.Verbosity
          ( Verbosity, normal )
 import Distribution.Simple.Utils
@@ -110,7 +112,9 @@ data GlobalFlags = GlobalFlags {
     globalCacheDir          :: Flag FilePath,
     globalLocalRepos        :: [FilePath],
     globalLogsDir           :: Flag FilePath,
-    globalWorldFile         :: Flag FilePath
+    globalWorldFile         :: Flag FilePath,
+    globalRequireSandbox    :: Flag Bool,
+    globalIgnoreSandbox     :: Flag Bool
   }
 
 defaultGlobalFlags :: GlobalFlags
@@ -119,11 +123,13 @@ defaultGlobalFlags  = GlobalFlags {
     globalNumericVersion    = Flag False,
     globalConfigFile        = mempty,
     globalSandboxConfigFile = mempty,
-    globalRemoteRepos       = [],
+    globalRemoteRepos       = mempty,
     globalCacheDir          = mempty,
     globalLocalRepos        = mempty,
     globalLogsDir           = mempty,
-    globalWorldFile         = mempty
+    globalWorldFile         = mempty,
+    globalRequireSandbox    = Flag False,
+    globalIgnoreSandbox     = Flag False
   }
 
 globalCommand :: CommandUI GlobalFlags
@@ -141,9 +147,9 @@ globalCommand = CommandUI {
       ++ "  " ++ pname ++ " install foo [--dry-run]\n\n"
       ++ "Occasionally you need to update the list of available packages:\n"
       ++ "  " ++ pname ++ " update\n",
-    commandDefaultFlags = defaultGlobalFlags,
+    commandDefaultFlags = mempty,
     commandOptions      = \showOrParseArgs ->
-      (case showOrParseArgs of ShowArgs -> take 4; ParseArgs -> id)
+      (case showOrParseArgs of ShowArgs -> take 6; ParseArgs -> id)
       [option ['V'] ["version"]
          "Print version information"
          globalVersion (\v flags -> flags { globalVersion = v })
@@ -164,6 +170,16 @@ globalCommand = CommandUI {
          \(default: './cabal.sandbox.config')"
          globalConfigFile (\v flags -> flags { globalSandboxConfigFile = v })
          (reqArgFlag "FILE")
+
+      ,option [] ["require-sandbox"]
+         "requiring the presence of a sandbox for sandbox-aware commands"
+         globalRequireSandbox (\v flags -> flags { globalRequireSandbox = v })
+         (boolOpt' ([], ["require-sandbox"]) ([], ["no-require-sandbox"]))
+
+      ,option [] ["ignore-sandbox"]
+         "Ignore any existing sandbox"
+         globalIgnoreSandbox (\v flags -> flags { globalIgnoreSandbox = v })
+         trueArg
 
       ,option [] ["remote-repo"]
          "The name and url for a remote repository"
@@ -202,7 +218,9 @@ instance Monoid GlobalFlags where
     globalCacheDir          = mempty,
     globalLocalRepos        = mempty,
     globalLogsDir           = mempty,
-    globalWorldFile         = mempty
+    globalWorldFile         = mempty,
+    globalRequireSandbox    = mempty,
+    globalIgnoreSandbox     = mempty
   }
   mappend a b = GlobalFlags {
     globalVersion           = combine globalVersion,
@@ -213,7 +231,9 @@ instance Monoid GlobalFlags where
     globalCacheDir          = combine globalCacheDir,
     globalLocalRepos        = combine globalLocalRepos,
     globalLogsDir           = combine globalLogsDir,
-    globalWorldFile         = combine globalWorldFile
+    globalWorldFile         = combine globalWorldFile,
+    globalRequireSandbox    = combine globalRequireSandbox,
+    globalIgnoreSandbox     = combine globalIgnoreSandbox
   }
     where combine field = field a `mappend` field b
 
@@ -243,28 +263,32 @@ configureOptions = commandOptions configureCommand
 
 filterConfigureFlags :: ConfigFlags -> Version -> ConfigFlags
 filterConfigureFlags flags cabalLibVersion
-  | cabalLibVersion >= Version [1,19,1] [] = flags_latest
+  | cabalLibVersion >= Version [1,19,2] [] = flags_latest
   | cabalLibVersion <  Version [1,3,10] [] = flags_1_3_10
   | cabalLibVersion <  Version [1,10,0] [] = flags_1_10_0
   | cabalLibVersion <  Version [1,14,0] [] = flags_1_14_0
   | cabalLibVersion <  Version [1,18,0] [] = flags_1_18_0
   | cabalLibVersion <  Version [1,19,1] [] = flags_1_19_0
+  | cabalLibVersion <  Version [1,19,2] [] = flags_1_19_1
   | otherwise = flags_latest
   where
-    -- Cabal >= 1.19.1 uses --dependency and does not need --constraint
+    -- Cabal >= 1.19.1 uses '--dependency' and does not need '--constraint'.
     flags_latest = flags        { configConstraints = [] }
 
-    -- Cabal < 1.19.1 does not grok the --dependency flag.
-    flags_1_19_0 = flags        { configDependencies = [] }
+    -- Cabal < 1.19.2 doesn't know about '--exact-configuration'.
+    flags_1_19_1 = flags_latest { configExactConfiguration = NoFlag }
+    -- Cabal < 1.19.1 uses '--constraint' instead of '--dependency'.
+    flags_1_19_0 = flags_1_19_1 { configDependencies = []
+                                , configConstraints  = configConstraints flags }
     -- Cabal < 1.18.0 doesn't know about --extra-prog-path and --sysconfdir.
     flags_1_18_0 = flags_1_19_0 { configProgramPathExtra = []
                                 , configInstallDirs = configInstallDirs_1_18_0}
     configInstallDirs_1_18_0 = (configInstallDirs flags) { sysconfdir = NoFlag }
-    -- Cabal < 1.14.0 doesn't know about --disable-benchmarks.
+    -- Cabal < 1.14.0 doesn't know about '--disable-benchmarks'.
     flags_1_14_0 = flags_1_18_0 { configBenchmarks  = NoFlag }
-    -- Cabal < 1.10.0 doesn't know about --disable-tests.
+    -- Cabal < 1.10.0 doesn't know about '--disable-tests'.
     flags_1_10_0 = flags_1_14_0 { configTests       = NoFlag }
-    -- Cabal < 1.3.10 does not grok the --constraints flag.
+    -- Cabal < 1.3.10 does not grok the '--constraints' flag.
     flags_1_3_10 = flags_1_10_0 { configConstraints = [] }
 
 -- ------------------------------------------------------------
@@ -277,18 +301,21 @@ data ConfigExFlags = ConfigExFlags {
     configCabalVersion :: Flag Version,
     configExConstraints:: [UserConstraint],
     configPreferences  :: [Dependency],
-    configSolver       :: Flag PreSolver
+    configSolver       :: Flag PreSolver,
+    configAllowNewer   :: Flag AllowNewer
   }
 
 defaultConfigExFlags :: ConfigExFlags
-defaultConfigExFlags = mempty { configSolver = Flag defaultSolver }
+defaultConfigExFlags = mempty { configSolver     = Flag defaultSolver
+                              , configAllowNewer = Flag AllowNewerNone }
 
 configureExCommand :: CommandUI (ConfigFlags, ConfigExFlags)
 configureExCommand = configureCommand {
     commandDefaultFlags = (mempty, defaultConfigExFlags),
     commandOptions      = \showOrParseArgs ->
-         liftOptions fst setFst (filter ((/="constraint") . optionName) $
-                                 configureOptions   showOrParseArgs)
+         liftOptions fst setFst
+         (filter ((`notElem` ["constraint", "dependency", "exact-configuration"])
+                  . optionName) $ configureOptions  showOrParseArgs)
       ++ liftOptions snd setSnd (configureExOptions showOrParseArgs)
   }
   where
@@ -320,6 +347,14 @@ configureExOptions _showOrParseArgs =
               (map display))
 
   , optionSolver configSolver (\v flags -> flags { configSolver = v })
+
+  , option [] ["allow-newer"]
+    "Ignore upper bounds in dependencies on some or all packages."
+    configAllowNewer (\v flags -> flags { configAllowNewer = v})
+    (optArg "PKGS"
+     (fmap Flag allowNewerParser) (Flag AllowNewerAll)
+     allowNewerPrinter)
+
   ]
 
 instance Monoid ConfigExFlags where
@@ -327,13 +362,15 @@ instance Monoid ConfigExFlags where
     configCabalVersion = mempty,
     configExConstraints= mempty,
     configPreferences  = mempty,
-    configSolver       = mempty
+    configSolver       = mempty,
+    configAllowNewer   = mempty
   }
   mappend a b = ConfigExFlags {
     configCabalVersion = combine configCabalVersion,
     configExConstraints= combine configExConstraints,
     configPreferences  = combine configPreferences,
-    configSolver       = combine configSolver
+    configSolver       = combine configSolver,
+    configAllowNewer   = combine configAllowNewer
   }
     where combine field = field a `mappend` field b
 
@@ -503,6 +540,57 @@ fetchCommand = CommandUI {
   }
 
 -- ------------------------------------------------------------
+-- * Freeze command
+-- ------------------------------------------------------------
+
+data FreezeFlags = FreezeFlags {
+      freezeDryRun           :: Flag Bool,
+      freezeSolver           :: Flag PreSolver,
+      freezeMaxBackjumps     :: Flag Int,
+      freezeReorderGoals     :: Flag Bool,
+      freezeIndependentGoals :: Flag Bool,
+      freezeShadowPkgs       :: Flag Bool,
+      freezeVerbosity        :: Flag Verbosity
+    }
+
+defaultFreezeFlags :: FreezeFlags
+defaultFreezeFlags = FreezeFlags {
+    freezeDryRun           = toFlag False,
+    freezeSolver           = Flag defaultSolver,
+    freezeMaxBackjumps     = Flag defaultMaxBackjumps,
+    freezeReorderGoals     = Flag False,
+    freezeIndependentGoals = Flag False,
+    freezeShadowPkgs       = Flag False,
+    freezeVerbosity        = toFlag normal
+   }
+
+freezeCommand :: CommandUI FreezeFlags
+freezeCommand = CommandUI {
+    commandName         = "freeze",
+    commandSynopsis     = "Freeze dependencies.",
+    commandDescription  = Nothing,
+    commandUsage        = usagePackages "freeze",
+    commandDefaultFlags = defaultFreezeFlags,
+    commandOptions      = \ showOrParseArgs -> [
+         optionVerbosity freezeVerbosity (\v flags -> flags { freezeVerbosity = v })
+
+       , option [] ["dry-run"]
+           "Do not freeze anything, only print what would be frozen"
+           freezeDryRun (\v flags -> flags { freezeDryRun = v })
+           trueArg
+
+       ] ++
+
+       optionSolver      freezeSolver           (\v flags -> flags { freezeSolver           = v }) :
+       optionSolverFlags showOrParseArgs
+                         freezeMaxBackjumps     (\v flags -> flags { freezeMaxBackjumps     = v })
+                         freezeReorderGoals     (\v flags -> flags { freezeReorderGoals     = v })
+                         freezeIndependentGoals (\v flags -> flags { freezeIndependentGoals = v })
+                         freezeShadowPkgs       (\v flags -> flags { freezeShadowPkgs       = v })
+
+  }
+
+-- ------------------------------------------------------------
 -- * Other commands
 -- ------------------------------------------------------------
 
@@ -655,7 +743,7 @@ getCommand = CommandUI {
        ++ "Alternatively, with -s it will\nget the code from the source "
        ++ "repository specified by the package.\n",
     commandUsage        = usagePackages "get",
-    commandDefaultFlags = mempty,
+    commandDefaultFlags = defaultGetFlags,
     commandOptions      = \_ -> [
         optionVerbosity getVerbosity (\v flags -> flags { getVerbosity = v })
 
@@ -688,7 +776,12 @@ unpackCommand = getCommand {
   }
 
 instance Monoid GetFlags where
-  mempty = defaultGetFlags
+  mempty = GetFlags {
+    getDestDir          = mempty,
+    getPristine         = mempty,
+    getSourceRepository = mempty,
+    getVerbosity        = mempty
+    }
   mappend a b = GetFlags {
     getDestDir          = combine getDestDir,
     getPristine         = combine getPristine,
@@ -858,6 +951,27 @@ defaultInstallFlags = InstallFlags {
   where
     docIndexFile = toPathTemplate ("$datadir" </> "doc" </> "index.html")
 
+allowNewerParser :: ReadE AllowNewer
+allowNewerParser = ReadE $ \s ->
+  case s of
+    ""      -> Right AllowNewerNone
+    "False" -> Right AllowNewerNone
+    "True"  -> Right AllowNewerAll
+    _       ->
+      case readPToMaybe pkgsParser s of
+        Just pkgs -> Right . AllowNewerSome $ pkgs
+        Nothing   -> Left ("Cannot parse the list of packages: " ++ s)
+  where
+    pkgsParser = Parse.sepBy1 parse (Parse.char ',')
+
+allowNewerPrinter :: Flag AllowNewer -> [Maybe String]
+allowNewerPrinter (Flag AllowNewerNone)        = [Just "False"]
+allowNewerPrinter (Flag AllowNewerAll)         = [Just "True"]
+allowNewerPrinter (Flag (AllowNewerSome pkgs)) =
+  [Just . intercalate "," . map display $ pkgs]
+allowNewerPrinter NoFlag                       = []
+
+
 defaultMaxBackjumps :: Int
 defaultMaxBackjumps = 200
 
@@ -889,7 +1003,9 @@ installCommand = CommandUI {
   commandDefaultFlags = (mempty, mempty, mempty, mempty),
   commandOptions      = \showOrParseArgs ->
        liftOptions get1 set1
-       (filter ((`notElem` ["constraint", "dependency"]) . optionName) $
+       (filter ((`notElem` ["constraint", "dependency"
+                           , "exact-configuration"])
+                . optionName) $
                               configureOptions   showOrParseArgs)
     ++ liftOptions get2 set2 (configureExOptions showOrParseArgs)
     ++ liftOptions get3 set3 (installOptions     showOrParseArgs)
@@ -1009,12 +1125,9 @@ installOptions showOrParseArgs =
           installOneShot (\v flags -> flags { installOneShot = v })
           (yesNoOpt showOrParseArgs)
 
-      , option "j" ["jobs"]
-        "Run NUM jobs simultaneously (or '$ncpus' if no NUM is given)."
+      , optionNumJobs
         installNumJobs (\v flags -> flags { installNumJobs = v })
-        (optArg "NUM" (fmap Flag numJobsParser)
-                      (Flag Nothing)
-                      (map (Just . maybe "$ncpus" show) . flagToList))
+
       ] ++ case showOrParseArgs of      -- TODO: remove when "cabal install"
                                         -- avoids
           ParseArgs ->
@@ -1395,10 +1508,12 @@ win32SelfUpgradeCommand = CommandUI {
 }
 
 instance Monoid Win32SelfUpgradeFlags where
-  mempty = defaultWin32SelfUpgradeFlags
+  mempty      = Win32SelfUpgradeFlags {
+    win32SelfUpgradeVerbosity = mempty
+    }
   mappend a b = Win32SelfUpgradeFlags {
     win32SelfUpgradeVerbosity = combine win32SelfUpgradeVerbosity
-  }
+    }
     where combine field = field a `mappend` field b
 
 -- ------------------------------------------------------------
@@ -1479,7 +1594,7 @@ liftOptions get set = map (liftOption get set)
 
 yesNoOpt :: ShowOrParseArgs -> MkOptDescr (b -> Flag Bool) (Flag Bool -> b -> b) b
 yesNoOpt ShowArgs sf lf = trueArg sf lf
-yesNoOpt _        sf lf = boolOpt' flagToMaybe Flag (sf, lf) ([], map ("no-" ++) lf) sf lf
+yesNoOpt _        sf lf = Command.boolOpt' flagToMaybe Flag (sf, lf) ([], map ("no-" ++) lf) sf lf
 
 optionSolver :: (flags -> Flag PreSolver)
              -> (Flag PreSolver -> flags -> flags)

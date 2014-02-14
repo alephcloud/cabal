@@ -57,6 +57,8 @@ import System.IO.Error
          ( isDoesNotExistError, ioeGetFileName )
 
 import Distribution.Client.Targets
+import Distribution.Client.Configure
+         ( chooseCabalVersion )
 import Distribution.Client.Dependency
 import Distribution.Client.Dependency.Types
          ( Solver(..) )
@@ -92,7 +94,7 @@ import qualified Distribution.Client.PackageIndex as SourcePackageIndex
 import qualified Distribution.Client.Win32SelfUpgrade as Win32SelfUpgrade
 import qualified Distribution.Client.World as World
 import qualified Distribution.InstalledPackageInfo as Installed
-import Paths_cabal_install_ssl (getBinDir)
+import Distribution.Client.Compat.ExecutablePath
 import Distribution.Client.JobControl
 
 import Distribution.Simple.Compiler
@@ -131,7 +133,7 @@ import Distribution.PackageDescription.Configuration
 import Distribution.ParseUtils
          ( showPWarning )
 import Distribution.Version
-         ( Version, anyVersion, thisVersion )
+         ( Version )
 import Distribution.Simple.Utils as Utils
          ( notice, info, warn, debug, debugNoWrap, die
          , intercalate, withTempDirectory )
@@ -334,6 +336,8 @@ planPackages comp platform mSandboxPkgInfo solver
       . setPreferenceDefault (if upgradeDeps then PreferAllLatest
                                              else PreferLatestForSelected)
 
+      . removeUpperBounds allowNewer
+
       . addPreferences
           -- preferences from the config file or command line
           [ PackageVersionPreference name ver
@@ -377,6 +381,7 @@ planPackages comp platform mSandboxPkgInfo solver
     maxBackjumps     = fromFlag (installMaxBackjumps     installFlags)
     upgradeDeps      = fromFlag (installUpgradeDeps      installFlags)
     onlyDeps         = fromFlag (installOnlyDeps         installFlags)
+    allowNewer       = fromFlag (configAllowNewer        configExFlags)
 
 -- | Remove the provided targets from the install plan.
 pruneInstallPlan :: Package pkg => [PackageSpecifier pkg] -> InstallPlan
@@ -502,7 +507,8 @@ linearizeInstallPlan installedPkgIndex plan =
           status = packageStatus installedPkgIndex pkg
           plan'' = InstallPlan.completed pkgid
                      (BuildOk DocsNotTried TestsNotTried
-                              (Just Installed.emptyInstalledPackageInfo))
+                              (Just $ Installed.emptyInstalledPackageInfo
+                              { Installed.sourcePackageId = pkgid }))
                      (InstallPlan.processing [pkg] plan')
           --FIXME: This is a bit of a hack,
           -- pretending that each package is installed
@@ -914,7 +920,8 @@ performInstallations verbosity
                       (configDistPref configFlags)
 
     setupScriptOptions index lock = SetupScriptOptions {
-      useCabalVersion  = maybe anyVersion thisVersion (libVersion miscOptions),
+      useCabalVersion  = chooseCabalVersion configExFlags
+                         (libVersion miscOptions),
       useCompiler      = Just comp,
       usePlatform      = Just platform,
       -- Hack: we typically want to allow the UserPackageDB for finding the
@@ -1092,8 +1099,10 @@ installReadyPackage platform comp configFlags
     configDependencies = [ (packageName (Installed.sourcePackageId deppkg),
                             Installed.installedPackageId deppkg)
                          | deppkg <- deps ],
-    configBenchmarks = toFlag False,
-    configTests = toFlag (TestStanzas `elem` stanzas)
+    -- Use '--exact-configuration' if supported.
+    configExactConfiguration = toFlag True,
+    configBenchmarks         = toFlag False,
+    configTests              = toFlag (TestStanzas `elem` stanzas)
   } source pkg pkgoverride
   where
     pkg = case finalizePackageDescription flags
@@ -1376,10 +1385,9 @@ installUnpackedPackage verbosity buildLimit installLock numJobs
           cmd flags [])
 
     reexec cmd = do
-      -- look for our on executable file and re-exec ourselves using
-      -- a helper program like sudo to elevate priviledges:
-      bindir <- getBinDir
-      let self = bindir </> "cabal" <.> exeExtension
+      -- look for our own executable file and re-exec ourselves using a helper
+      -- program like sudo to elevate priviledges:
+      self <- getExecutablePath
       weExist <- doesFileExist self
       if weExist
         then inDir workingDir $

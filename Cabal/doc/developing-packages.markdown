@@ -809,9 +809,12 @@ describe the package as a whole:
 :   The type of license under which this package is distributed.
     License names are the constants of the [License][dist-license] type.
 
-`license-file:` _filename_
-:   The name of a file containing the precise license for this package.
-    It will be installed with the package.
+`license-file:` _filename_ or `license-files:` _filename list_
+:   The name of a file(s) containing the precise copyright license for
+    this package. The license file(s) will be installed with the package.
+
+    If you have multiple license files then use the `license-files`
+    field instead of (or in addition to) the `license-file` field.
 
 `copyright:` _freeform_
 :   The content of a copyright notice, typically the name of the holder
@@ -967,6 +970,21 @@ cabal repl exe:foo
 cabal repl test:bar
 cabal repl bench:baz
 ~~~~~~~~~~~~~~~~
+
+#### Freezing dependency versions ####
+
+If a package is built in several different environments, such as a development
+environment, a staging environment and a production environment, it may be
+necessary or desirable to ensure that the same dependency versions are
+selected in each environment. This can be done with the `freeze` command:
+
+~~~~~~~~~~~~~~~~
+cabal freeze
+~~~~~~~~~~~~~~~~
+
+The command writes the selected version for all dependencies to the
+`cabal.config` file.  All environments which share this file will use the
+dependency versions specified in it.
 
 ### Executables ###
 
@@ -1973,7 +1991,7 @@ can update the necessary fields programmatically instead of using the
 ## Conditional compilation ##
 
 Sometimes you want to write code that works with more than one version
-of a dependency.  You can specify a range of versions for the depenency
+of a dependency.  You can specify a range of versions for the dependency
 in the `build-depends`, but how do you then write the code that can use
 different versions of the API?
 

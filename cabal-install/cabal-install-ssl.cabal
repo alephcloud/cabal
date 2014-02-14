@@ -1,5 +1,5 @@
 Name:               cabal-install-ssl
-Version:            1.19.1
+Version:            1.19.2
 Synopsis:           The command-line interface for Cabal and Hackage.
 Description:
     The \'cabal\' command-line program simplifies the process of managing
@@ -71,6 +71,7 @@ executable cabal-ssl
         Distribution.Client.Dependency.Modular.Version
         Distribution.Client.Fetch
         Distribution.Client.FetchUtils
+        Distribution.Client.Freeze
         Distribution.Client.Get
         Distribution.Client.GZipUtils
         Distribution.Client.Haddock
@@ -106,7 +107,9 @@ executable cabal-ssl
         Distribution.Client.World
         Distribution.Client.Win32SelfUpgrade
         Distribution.Client.Compat.Environment
+        Distribution.Client.Compat.ExecutablePath
         Distribution.Client.Compat.FilePerms
+        Distribution.Client.Compat.Process
         Distribution.Client.Compat.Semaphore
         Distribution.Client.Compat.Time
         Paths_cabal_install_ssl
@@ -117,7 +120,7 @@ executable cabal-ssl
         array      >= 0.1      && < 0.6,
         base       >= 4.3      && < 5,
         bytestring >= 0.9      && < 1,
-        Cabal      == 1.19.1,
+        Cabal      == 1.19.2,
         containers >= 0.1      && < 0.6,
         filepath   >= 1.0      && < 1.4,
         HTTP       >= 4000.0.8 && < 4001,

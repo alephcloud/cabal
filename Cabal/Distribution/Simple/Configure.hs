@@ -92,7 +92,7 @@ import Distribution.PackageDescription as PD
     ( PackageDescription(..), specVersion, GenericPackageDescription(..)
     , Library(..), hasLibs, Executable(..), BuildInfo(..), allExtensions
     , HookedBuildInfo, updatePackageDescription, allBuildInfo
-    , FlagName(..), TestSuite(..), Benchmark(..) )
+    , Flag(flagName), FlagName(..), TestSuite(..), Benchmark(..) )
 import Distribution.PackageDescription.Configuration
     ( finalizePackageDescription, mapTreeData )
 import Distribution.PackageDescription.Check
@@ -142,7 +142,7 @@ import qualified Distribution.Simple.HaskellSuite as HaskellSuite
 import Control.Monad
     ( when, unless, foldM, filterM )
 import Data.List
-    ( nub, partition, isPrefixOf, inits )
+    ( (\\), nub, partition, isPrefixOf, inits )
 import Data.Maybe
     ( isNothing, catMaybes, fromMaybe )
 import Data.Monoid
@@ -248,7 +248,6 @@ showHeader pkgid =
      "Saved package config for " ++ display pkgid
   ++ " written by " ++ display currentCabalId
   ++      " using " ++ display currentCompilerId
-  where
 
 currentCabalId :: PackageIdentifier
 currentCabalId = PackageIdentifier (PackageName "Cabal") cabalVersion
@@ -339,11 +338,34 @@ configure (pkg_descr0, pbi) cfg
         installedPackageSet <- getInstalledPackages (lessVerbose verbosity) comp
                                       packageDbs programsConfig'
 
-        let -- Constraint test function for the solver
-            dependencySatisfiable =
-                not . null . PackageIndex.lookupDependency pkgs'
+        (allConstraints, requiredDepsMap) <- either die return $
+          combinedConstraints (configConstraints cfg)
+                              (configDependencies cfg)
+                              installedPackageSet
+
+        let exactConf = fromFlagOrDefault False (configExactConfiguration cfg)
+            -- Constraint test function for the solver
+            dependencySatisfiable d@(Dependency depName verRange)
+              | exactConf =
+                -- When we're given '--exact-configuration', we assume that all
+                -- dependencies and flags are exactly specified on the command
+                -- line. Thus we only consult the 'requiredDepsMap'. Note that
+                -- we're not doing the version range check, so if there's some
+                -- dependency that wasn't specified on the command line,
+                -- 'finalizePackageDescription' will fail.
+                --
+                -- TODO: mention '--exact-configuration' in the error message
+                -- when this fails?
+                (depName `Map.member` requiredDepsMap) || isInternalDep
+
+              | otherwise =
+                -- Normal operation: just look up dependency in the package
+                -- index.
+                not . null . PackageIndex.lookupDependency pkgs' $ d
               where
                 pkgs' = PackageIndex.insert internalPackage installedPackageSet
+                isInternalDep = pkgName pid == depName
+                                && pkgVersion pid `withinRange` verRange
             enableTest t = t { testEnabled = fromFlag (configTests cfg) }
             flaggedTests = map (\(n, t) -> (n, mapTreeData enableTest t))
                                (condTestSuites pkg_descr0)
@@ -354,11 +376,6 @@ configure (pkg_descr0, pbi) cfg
                                (condBenchmarks pkg_descr0)
             pkg_descr0'' = pkg_descr0 { condTestSuites = flaggedTests
                                       , condBenchmarks = flaggedBenchmarks }
-
-        (allConstraints, requiredDepsMap) <- either die return $
-          combinedConstraints (configConstraints cfg)
-                              (configDependencies cfg)
-                              installedPackageSet
 
         (pkg_descr0', flags) <-
                 case finalizePackageDescription
@@ -374,6 +391,17 @@ configure (pkg_descr0, pbi) cfg
                          ++ (render . nest 4 . sep . punctuate comma
                                     . map (disp . simplifyDependency)
                                     $ missing)
+
+        -- Sanity check: if '--exact-configuration' was given, ensure that the
+        -- complete flag assignment was specified on the command line.
+        when exactConf $ do
+          let cmdlineFlags = map fst (configConfigurationsFlags cfg)
+              allFlags     = map flagName . genPackageFlags $ pkg_descr0
+              diffFlags    = allFlags \\ cmdlineFlags
+          when (not . null $ diffFlags) $
+            die $ "'--exact-conf' was given, "
+            ++ "but the following flags were not specified: "
+            ++ intercalate ", " (map show diffFlags)
 
         -- add extra include/lib dirs as specified in cfg
         -- we do it here so that those get checked too
@@ -545,6 +573,7 @@ configure (pkg_descr0, pbi) cfg
                     withGHCiLib         = fromFlag $ configGHCiLib cfg,
                     splitObjs           = split_objs,
                     stripExes           = fromFlag $ configStripExes cfg,
+                    stripLibs           = fromFlag $ configStripLibs cfg,
                     withPackageDB       = packageDbs,
                     progPrefix          = fromFlag $ configProgPrefix cfg,
                     progSuffix          = fromFlag $ configProgSuffix cfg
@@ -655,17 +684,15 @@ selectDependency internalIndex installedIndex requiredDepsMap
     [(_,[pkg])] | packageVersion pkg `withinRange` vr
            -> Right $ InternalDependency dep (packageId pkg)
 
-    _      -> case PackageIndex.lookupDependency installedIndex dep of
-      []   -> Left  $ DependencyNotExists pkgname
-      pkgs -> Right $ ExternalDependency dep $
-                case Map.lookup pkgname requiredDepsMap of
-                  -- if we know the exact pkg to use then use it
-                  Just pkginstance -> pkginstance
-                  -- otherwise we just pick an arbirary instance of the
-                  -- latest version
-                  Nothing ->
-                    case last pkgs of
-                      (_ver, pkginstances) -> head pkginstances
+    _      -> case Map.lookup pkgname requiredDepsMap of
+      -- If we know the exact pkg to use, then use it.
+      Just pkginstance -> Right (ExternalDependency dep pkginstance)
+      -- Otherwise we just pick an arbitrary instance of the latest version.
+      Nothing -> case PackageIndex.lookupDependency installedIndex dep of
+        []   -> Left  $ DependencyNotExists pkgname
+        pkgs -> Right $ ExternalDependency dep $
+                case last pkgs of
+                  (_ver, pkginstances) -> head pkginstances
 
 reportSelectedDependencies :: Verbosity
                            -> [ResolvedDependency] -> IO ()
@@ -769,7 +796,7 @@ newPackageDepsBehaviour pkg =
 combinedConstraints :: [Dependency] ->
                        [(PackageName, InstalledPackageId)] ->
                        PackageIndex ->
-                       Either String ([Dependency], 
+                       Either String ([Dependency],
                                       Map PackageName InstalledPackageInfo)
 combinedConstraints constraints dependencies installedPackages = do
 
@@ -886,9 +913,11 @@ configurePkgconfigPackages verbosity pkg_descr conf
         Just v | not (withinRange v range) -> die (badVersion v)
                | otherwise                 -> info verbosity (depSatisfied v)
       where
-        notFound     = "The pkg-config package " ++ pkg ++ versionRequirement
+        notFound     = "The pkg-config package '" ++ pkg ++ "'"
+                    ++ versionRequirement
                     ++ " is required but it could not be found."
-        badVersion v = "The pkg-config package " ++ pkg ++ versionRequirement
+        badVersion v = "The pkg-config package '" ++ pkg ++ "'"
+                    ++ versionRequirement
                     ++ " is required but the version installed on the"
                     ++ " system is version " ++ display v
         depSatisfied v = "Dependency " ++ display dep
@@ -1159,6 +1188,7 @@ checkForeignDeps pkg lbi verbosity = do
                 _ <- rawSystemProgramStdoutConf verbosity
                   gccProgram (withPrograms lbi) (cName:"-o":oNname:args)
                 return True
+           --TODO: need a better error in the case of not finding gcc!
            `catchIO`   (\_ -> return False)
            `catchExit` (\_ -> return False)
 

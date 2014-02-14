@@ -5,6 +5,8 @@ module Distribution.Client.Upload (check, upload, report) where
 
 import qualified Data.ByteString.Lazy.Char8 as B8
 import qualified Data.Text as T
+import qualified Data.ByteString.Lazy.Char8 as B (concat, length, pack, readFile, unpack)
+import           Data.ByteString.Lazy.Char8 (ByteString)
 
 import Distribution.Client.Types (Username(..), Password(..),Repo(..),RemoteRepo(..))
 import Distribution.Client.HttpUtils
@@ -141,3 +143,8 @@ mkUploadRequest uri path =
         [ HTTPC.partFileSource (T.pack "package") path ]
         (mkRequest "POST" uri Nothing Nothing)
 
+crlf :: ByteString
+crlf = B.pack "\r\n"
+
+dd :: ByteString
+dd = B.pack "--"

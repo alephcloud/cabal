@@ -22,6 +22,7 @@ import Distribution.Client.Setup
          , InstallFlags(..), defaultInstallFlags
          , installCommand, upgradeCommand
          , FetchFlags(..), fetchCommand
+         , FreezeFlags(..), freezeCommand
          , GetFlags(..), getCommand, unpackCommand
          , checkCommand
          , updateCommand
@@ -61,6 +62,7 @@ import Distribution.Client.Install            (install)
 import Distribution.Client.Configure          (configure)
 import Distribution.Client.Update             (update)
 import Distribution.Client.Fetch              (fetch)
+import Distribution.Client.Freeze             (freeze)
 import Distribution.Client.Check as Check     (check)
 --import Distribution.Client.Clean            (clean)
 import Distribution.Client.Upload as Upload   (upload, check, report)
@@ -84,6 +86,7 @@ import Distribution.Client.Sandbox            (sandboxInit
                                               ,maybeReinstallAddSourceDeps
                                               ,tryGetIndexFilePath
                                               ,sandboxBuildDir
+                                              ,updateSandboxConfigFileFlag
 
                                               ,configCompilerAux'
                                               ,configPackageDB')
@@ -99,6 +102,8 @@ import Distribution.Client.Utils              (determineNumJobs
 
 import Distribution.PackageDescription
          ( Executable(..) )
+import Distribution.Simple.Build
+         ( startInterpreter )
 import Distribution.Simple.Command
          ( CommandParse(..), CommandUI(..), Command
          , commandsRun, commandAddAction, hiddenCommand )
@@ -112,7 +117,7 @@ import qualified Distribution.Simple.LocalBuildInfo as LBI
 import Distribution.Simple.Program (defaultProgramConfiguration)
 import qualified Distribution.Simple.Setup as Cabal
 import Distribution.Simple.Utils
-         ( cabalVersion, die, notice, info, topHandler )
+         ( cabalVersion, die, notice, info, topHandler, findPackageDesc )
 import Distribution.Text
          ( display )
 import Distribution.Verbosity as Verbosity
@@ -126,7 +131,7 @@ import System.Exit              (exitFailure)
 import System.FilePath          (splitExtension, takeExtension)
 import System.IO                (BufferMode(LineBuffering),
                                  hSetBuffering, stdout)
-import System.Directory         (doesFileExist)
+import System.Directory         (doesFileExist, getCurrentDirectory)
 import Data.List                (intercalate)
 import Data.Monoid              (Monoid(..))
 import Control.Monad            (when, unless)
@@ -146,14 +151,18 @@ mainWorker args = topHandler $
     CommandHelp   help                 -> printGlobalHelp help
     CommandList   opts                 -> printOptionsList opts
     CommandErrors errs                 -> printErrors errs
-    CommandReadyToGo (globalflags, commandParse)  ->
+    CommandReadyToGo (globalFlags, commandParse)  ->
       case commandParse of
-        _ | fromFlag (globalVersion globalflags)        -> printVersion
-          | fromFlag (globalNumericVersion globalflags) -> printNumericVersion
+        _ | fromFlagOrDefault False (globalVersion globalFlags)
+            -> printVersion
+          | fromFlagOrDefault False (globalNumericVersion globalFlags)
+            -> printNumericVersion
         CommandHelp     help           -> printCommandHelp help
         CommandList     opts           -> printOptionsList opts
         CommandErrors   errs           -> printErrors errs
-        CommandReadyToGo action        -> action globalflags
+        CommandReadyToGo action        -> do
+          globalFlags' <- updateSandboxConfigFileFlag globalFlags
+          action globalFlags'
 
   where
     printCommandHelp help = do
@@ -184,6 +193,7 @@ mainWorker args = topHandler $
       ,listCommand            `commandAddAction` listAction
       ,infoCommand            `commandAddAction` infoAction
       ,fetchCommand           `commandAddAction` fetchAction
+      ,freezeCommand          `commandAddAction` freezeAction
       ,getCommand             `commandAddAction` getAction
       ,hiddenCommand $
        unpackCommand          `commandAddAction` unpackAction
@@ -255,6 +265,9 @@ configureAction (configFlags, configExFlags) extraArgs globalFlags = do
 
   whenUsingSandbox useSandbox $ \sandboxDir -> do
     initPackageDBIfNeeded verbosity configFlags'' comp conf
+    -- NOTE: We do not write the new sandbox package DB location to
+    -- 'cabal.sandbox.config' here because 'configure -w' must not affect
+    -- subsequent 'install' (for UI compatibility with non-sandboxed mode).
 
     indexFile     <- tryGetIndexFilePath config
     maybeAddCompilerTimestampRecord verbosity sandboxDir indexFile
@@ -323,32 +336,47 @@ filterBuildFlags version config buildFlags
 
 replAction :: ReplFlags -> [String] -> GlobalFlags -> IO ()
 replAction replFlags extraArgs globalFlags = do
-  let distPref    = fromFlagOrDefault (useDistPref defaultSetupScriptOptions)
-                    (replDistPref replFlags)
-      verbosity   = fromFlagOrDefault normal (replVerbosity replFlags)
-      noAddSource = case replReload replFlags of
-                      Flag True -> SkipAddSourceDepsCheck
-                      _         -> DontSkipAddSourceDepsCheck
+  cwd     <- getCurrentDirectory
+  pkgDesc <- findPackageDesc cwd
+  either (const onNoPkgDesc) (const onPkgDesc) pkgDesc
+  where
+    verbosity = fromFlagOrDefault normal (replVerbosity replFlags)
 
-  -- Calls 'configureAction' to do the real work, so nothing special has to be
-  -- done to support sandboxes.
-  (useSandbox, _config) <- reconfigure verbosity distPref
-                           mempty [] globalFlags noAddSource NoFlag
-                           (const Nothing)
+    -- There is a .cabal file in the current directory: start a REPL and load
+    -- the project's modules.
+    onPkgDesc = do
+      let distPref    = fromFlagOrDefault (useDistPref defaultSetupScriptOptions)
+                        (replDistPref replFlags)
+          noAddSource = case replReload replFlags of
+                          Flag True -> SkipAddSourceDepsCheck
+                          _         -> DontSkipAddSourceDepsCheck
+          progConf     = defaultProgramConfiguration
+          setupOptions = defaultSetupScriptOptions
+            { useCabalVersion = orLaterVersion $ Version [1,18,0] []
+            , useDistPref     = distPref
+            }
+          replFlags'   = replFlags
+            { replVerbosity = toFlag verbosity
+            , replDistPref  = toFlag distPref
+            }
+      -- Calls 'configureAction' to do the real work, so nothing special has to
+      -- be done to support sandboxes.
+      (useSandbox, _config) <- reconfigure verbosity distPref
+                               mempty [] globalFlags noAddSource NoFlag
+                               (const Nothing)
 
-  maybeWithSandboxDirOnSearchPath useSandbox $
-    let progConf     = defaultProgramConfiguration
-        setupOptions = defaultSetupScriptOptions
-          { useCabalVersion = orLaterVersion $ Version [1,18,0] []
-          , useDistPref     = distPref
-          }
-        replFlags'   = replFlags
-          { replVerbosity = toFlag verbosity
-          , replDistPref  = toFlag distPref
-          }
-    in setupWrapper verbosity setupOptions Nothing
-         (Cabal.replCommand progConf) (const replFlags') extraArgs
+      maybeWithSandboxDirOnSearchPath useSandbox $
+        setupWrapper verbosity setupOptions Nothing
+        (Cabal.replCommand progConf) (const replFlags') extraArgs
 
+    -- No .cabal file in the current directory: just start the REPL (possibly
+    -- using the sandbox package DB).
+    onNoPkgDesc = do
+      (_useSandbox, config) <- loadConfigOrSandboxConfig verbosity globalFlags
+                               mempty
+      let configFlags = savedConfigureFlags config
+      (comp, _platform, programDb) <- configCompilerAux' configFlags
+      startInterpreter verbosity programDb comp (configPackageDB' configFlags)
 
 -- | Re-configure the package in the current directory if needed. Deciding
 -- when to reconfigure and with which options is convoluted:
@@ -697,7 +725,7 @@ benchmarkAction (benchmarkFlags, buildFlags, buildExFlags)
 listAction :: ListFlags -> [String] -> GlobalFlags -> IO ()
 listAction listFlags extraArgs globalFlags = do
   let verbosity = fromFlag (listVerbosity listFlags)
-  (_, config) <- loadConfigOrSandboxConfig verbosity globalFlags mempty
+  (_useSandbox, config) <- loadConfigOrSandboxConfig verbosity globalFlags mempty
   let configFlags' = savedConfigureFlags config
       configFlags  = configFlags' {
         configPackageDBs = configPackageDBs configFlags'
@@ -717,7 +745,7 @@ infoAction :: InfoFlags -> [String] -> GlobalFlags -> IO ()
 infoAction infoFlags extraArgs globalFlags = do
   let verbosity = fromFlag (infoVerbosity infoFlags)
   targets <- readUserTargets verbosity extraArgs
-  (_, config) <- loadConfigOrSandboxConfig verbosity globalFlags mempty
+  (_useSandbox, config) <- loadConfigOrSandboxConfig verbosity globalFlags mempty
   let configFlags' = savedConfigureFlags config
       configFlags  = configFlags' {
         configPackageDBs = configPackageDBs configFlags'
@@ -771,6 +799,24 @@ fetchAction fetchFlags extraArgs globalFlags = do
         (globalRepos globalFlags')
         comp platform conf globalFlags' fetchFlags
         targets
+
+freezeAction :: FreezeFlags -> [String] -> GlobalFlags -> IO ()
+freezeAction freezeFlags _extraArgs globalFlags = do
+  let verbosity = fromFlag (freezeVerbosity freezeFlags)
+  (useSandbox, config) <- loadConfigOrSandboxConfig verbosity globalFlags mempty
+  let configFlags  = savedConfigureFlags config
+      globalFlags' = savedGlobalFlags config `mappend` globalFlags
+  (comp, platform, conf) <- configCompilerAux' configFlags
+
+  maybeWithSandboxPackageInfo verbosity configFlags globalFlags'
+                              comp platform conf useSandbox $ \mSandboxPkgInfo ->
+                              maybeWithSandboxDirOnSearchPath useSandbox $
+      freeze verbosity
+            (configPackageDB' configFlags)
+            (globalRepos globalFlags')
+            comp platform conf
+            mSandboxPkgInfo
+            globalFlags' freezeFlags
 
 uploadAction :: UploadFlags -> [String] -> GlobalFlags -> IO ()
 uploadAction uploadFlags extraArgs globalFlags = do

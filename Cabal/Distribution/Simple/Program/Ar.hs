@@ -12,23 +12,26 @@
 
 module Distribution.Simple.Program.Ar (
     createArLibArchive,
-    multiStageProgramInvocation,
+    multiStageProgramInvocation
   ) where
 
-import Control.Monad (unless)
+import Control.Monad (when, unless)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import Data.Char (isSpace)
 import Distribution.Compat.CopyFile (filesEqual)
-import Distribution.Simple.Program.Types
-         ( ConfiguredProgram(..) )
+import Distribution.Simple.LocalBuildInfo (LocalBuildInfo(..))
+import Distribution.Simple.Program
+         ( arProgram, requireProgram )
 import Distribution.Simple.Program.Run
          ( programInvocation, multiStageProgramInvocation
          , runProgramInvocation )
+import qualified Distribution.Simple.Program.Strip as Strip
+         ( stripLib )
 import Distribution.Simple.Utils
          ( dieWithLocation, withTempDirectory )
 import Distribution.System
-         ( OS(..), buildOS )
+         ( Arch(..), OS(..), Platform(..) )
 import Distribution.Verbosity
          ( Verbosity, deafening, verbose )
 import System.Directory (doesFileExist, renameFile)
@@ -39,9 +42,10 @@ import System.IO
 
 -- | Call @ar@ to create a library archive from a bunch of object files.
 --
-createArLibArchive :: Verbosity -> ConfiguredProgram
+createArLibArchive :: Verbosity -> LocalBuildInfo
                    -> FilePath -> [FilePath] -> IO ()
-createArLibArchive verbosity ar targetPath files = do
+createArLibArchive verbosity lbi targetPath files = do
+  (ar, _) <- requireProgram verbosity arProgram progConf
 
   let (targetDir, targetName) = splitFileName targetPath
   withTempDirectory verbosity targetDir targetName $ \ tmpDir -> do
@@ -61,12 +65,12 @@ createArLibArchive verbosity ar targetPath files = do
   -- When we need to call ar multiple times we use "ar q" and for the last
   -- call on OSX we use "ar qs" so that it'll make the index.
 
-  let simpleArgs  = case buildOS of
+  let simpleArgs  = case hostOS of
              OSX -> ["-r", "-s"]
              _   -> ["-r"]
 
       initialArgs = ["-q"]
-      finalArgs   = case buildOS of
+      finalArgs   = case hostOS of
              OSX -> ["-q", "-s"]
              _   -> ["-q"]
 
@@ -82,11 +86,16 @@ createArLibArchive verbosity ar targetPath files = do
         | inv <- multiStageProgramInvocation
                    simple (initial, middle, final) files ]
 
-  wipeMetadata tmpPath
+  when stripLib $ Strip.stripLib verbosity platform progConf tmpPath
+  unless (hostArch == Arm) $ -- See #1537
+    wipeMetadata tmpPath
   equal <- filesEqual tmpPath targetPath
   unless equal $ renameFile tmpPath targetPath
 
   where
+    progConf = withPrograms lbi
+    stripLib = stripLibs    lbi
+    platform@(Platform hostArch hostOS) = hostPlatform lbi
     verbosityOpts v | v >= deafening = ["-v"]
                     | v >= verbose   = []
                     | otherwise      = ["-c"]
