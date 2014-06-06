@@ -5,8 +5,6 @@ module Distribution.Client.Upload (check, upload, report) where
 
 import qualified Data.ByteString.Lazy.Char8 as B8
 import qualified Data.Text as T
-import qualified Data.ByteString.Lazy.Char8 as B (concat, length, pack, readFile, unpack)
-import           Data.ByteString.Lazy.Char8 (ByteString)
 
 import Distribution.Client.Types (Username(..), Password(..),Repo(..),RemoteRepo(..))
 import Distribution.Client.HttpUtils
@@ -32,11 +30,9 @@ import System.FilePath  ((</>), takeExtension)
 import qualified System.FilePath.Posix as FilePath.Posix (combine)
 import System.Directory
 import Control.Monad (forM_, when)
-import Control.Monad.Trans.Resource
 
 import qualified Network.HTTP.Conduit as HTTPC
-import qualified Network.HTTP.Conduit.MultipartFormData as HTTPC
-
+import qualified Network.HTTP.Client.MultipartFormData as HTTPC
 
 --FIXME: how do we find this path for an arbitrary hackage server?
 -- is it always at some fixed location relative to the server root?
@@ -137,14 +133,9 @@ handlePackage verbosity uri path =
 
 -- use sequece: mkRequest and doHTTP
 
-mkUploadRequest :: (Monad m, MonadResource m) => URI -> FilePath -> IO (HTTPC.Request m)
+mkUploadRequest :: URI -> FilePath -> IO HTTPC.Request
 mkUploadRequest uri path =
     HTTPC.formDataBody
         [ HTTPC.partFileSource (T.pack "package") path ]
         (mkRequest "POST" uri Nothing Nothing)
 
-crlf :: ByteString
-crlf = B.pack "\r\n"
-
-dd :: ByteString
-dd = B.pack "--"

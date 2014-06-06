@@ -30,8 +30,6 @@ import Distribution.Verbosity (Verbosity)
 import Distribution.Simple.Utils
          ( die, info, warn, debug, notice
          , copyFileVerbose, writeFileAtomic )
-import Distribution.System
-         ( buildOS, buildArch )
 import Distribution.Text
          ( display )
 import Data.Char ( isSpace )
@@ -46,21 +44,19 @@ import Control.Concurrent ( newMVar, MVar, modifyMVar, modifyMVar_ )
 import Control.Exception ( bracket )
 import Control.Monad ( when )
 import Control.Monad.IO.Class ( MonadIO, liftIO )
-import Control.Monad.Trans.Resource
 
 import qualified Data.ByteString.Char8 as B8
 import qualified Data.CaseInsensitive as CI ( original, mk )
-import Data.Default ( def )
 import Data.Maybe ( mapMaybe )
 import qualified Data.Map as M
 
 import Network (withSocketsDo)
 import qualified Network.HTTP.Conduit as HTTPC
+import qualified Data.Default as HTTPC (def)
+import qualified Network.Connection as HTTPC (TLSSettings(..))
 import Network.HTTP.Headers ( parseHeader, lookupHeader, HeaderName(HdrETag) )
 import qualified Network.HTTP.Types.Header as HTTP ( hUserAgent )
 import qualified Network.HTTP.Types.Status as HTTP
-import qualified Network.TLS as TLS
-         ( CertificateUsage( CertificateUsageAccept ) )
 
 import System.IO ( hFlush, stdin, stdout, hGetEcho, hSetEcho )
 import System.IO.Unsafe ( unsafePerformIO )
@@ -106,11 +102,11 @@ promptPassword realm = liftIO $ do
 mkRequest :: String                      -- ^ the HTTP method
           -> URI
           -> Maybe String                -- ^ Optional etag to check if we already have the latest file
-          -> Maybe (HTTPC.RequestBody m) -- ^ the body
-          -> HTTPC.Request m
-mkRequest method uri etag body
-  | Just b <- body = req { HTTPC.requestBody = b }
-  | otherwise = req
+          -> Maybe HTTPC.RequestBody     -- ^ the body
+          -> HTTPC.Request
+mkRequest method uri etag body = case body of
+  Just b -> req { HTTPC.requestBody = b }
+  Nothing -> req
 
   where
   req = HTTPC.def
@@ -162,7 +158,7 @@ getHTTP _verbosity uri etag = doHTTP _verbosity uri $ mkRequest "GET" uri etag N
 --
 doHTTP :: Verbosity
        -> URI
-       -> HTTPC.Request (ResourceT IO)
+       -> HTTPC.Request
        -> IO (Result (Response ByteString))
 doHTTP _verbosity uri req = withSocketsDo $ do
 
@@ -195,10 +191,8 @@ doHTTP _verbosity uri req = withSocketsDo $ do
     Just x -> x
 
   -- FOR TESTING ONLY
-  withInsecureManager = HTTPC.withManagerSettings settings
-    where
-    settings = def { HTTPC.managerCheckCerts = accept }
-    accept _ _ _ = return TLS.CertificateUsageAccept
+  withInsecureManager = HTTPC.withManagerSettings $
+    HTTPC.mkManagerSettings (HTTPC.TLSSettingsSimple True False False) Nothing
 
   requestWithAuth username password manager = do
     when (not (HTTPC.secure req)) . error $
