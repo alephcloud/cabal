@@ -56,7 +56,7 @@ module Distribution.Simple (
 -- local
 import Distribution.Simple.Compiler hiding (Flag)
 import Distribution.Simple.UserHooks
-import Distribution.Package --must not specify imports, since we're exporting moule.
+import Distribution.Package --must not specify imports, since we're exporting module.
 import Distribution.PackageDescription
          ( PackageDescription(..), GenericPackageDescription, Executable(..)
          , updatePackageDescription, hasLibs
@@ -105,7 +105,7 @@ import Distribution.Text
 import System.Environment(getArgs, getProgName)
 import System.Directory(removeFile, doesFileExist,
                         doesDirectoryExist, removeDirectoryRecursive)
-import System.Exit
+import System.Exit       (exitWith,ExitCode(..))
 import System.IO.Error   (isDoesNotExistError)
 import Control.Exception (throwIO)
 import Distribution.Compat.Environment (getEnvironment)
@@ -453,7 +453,7 @@ getBuildConfig hooks verbosity distPref = do
       let cFlags' = cFlags {
             -- Since the list of unconfigured programs is not serialized,
             -- restore it to the same value as normally used at the beginning
-            -- of a conigure run:
+            -- of a configure run:
             configPrograms = restoreProgramConfiguration
                                (builtinPrograms ++ hookedPrograms hooks)
                                (configPrograms cFlags),

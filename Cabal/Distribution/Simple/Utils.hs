@@ -24,6 +24,7 @@ module Distribution.Simple.Utils (
         topHandler, topHandlerWith,
         warn, notice, setupMessage, info, debug,
         debugNoWrap, chattyTry,
+        printRawCommandAndArgs,
 
         -- * running programs
         rawSystemExit,
@@ -149,7 +150,7 @@ import System.Directory
 import System.IO
     ( Handle, openFile, openBinaryFile, openBinaryTempFile
     , IOMode(ReadMode), hSetBinaryMode
-    , hGetContents, stdin, stderr, stdout, hPutStr, hFlush, hClose )
+    , hGetContents, stderr, stdout, hPutStr, hFlush, hClose )
 import System.IO.Error as IO.Error
     ( isDoesNotExistError, isAlreadyExistsError
     , ioeSetFileName, ioeGetFileName, ioeGetErrorString )
@@ -169,23 +170,12 @@ import Distribution.Version
     (Version(..))
 
 import Control.Exception (IOException, evaluate, throwIO)
-import System.Process (rawSystem)
-import qualified System.Process as Process (CreateProcess(..))
-
 import Control.Concurrent (forkIO)
-import System.Process (runInteractiveProcess, waitForProcess, proc,
-                       StdStream(..))
-#if __GLASGOW_HASKELL__ >= 702
-import System.Process (showCommandForUser)
-#endif
-
-#ifndef mingw32_HOST_OS
-import System.Posix.Signals (installHandler, sigINT, sigQUIT, Handler(..))
-import System.Process.Internals (defaultSignal, runGenProcess_)
-#else
-import System.Process (createProcess)
-#endif
-
+import qualified System.Process as Process
+         ( CreateProcess(..), StdStream(..), proc)
+import System.Process
+         ( createProcess, rawSystem, runInteractiveProcess
+         , showCommandForUser, waitForProcess)
 import Distribution.Compat.CopyFile
          ( copyFile, copyOrdinaryFile, copyExecutableFile
          , setFileOrdinary, setFileExecutable, setDirOrdinary )
@@ -345,12 +335,7 @@ maybeExit cmd = do
 printRawCommandAndArgs :: Verbosity -> FilePath -> [String] -> IO ()
 printRawCommandAndArgs verbosity path args
  | verbosity >= deafening = print (path, args)
- | verbosity >= verbose   =
-#if __GLASGOW_HASKELL__ >= 702
-                            putStrLn $ showCommandForUser path args
-#else
-                            putStrLn $ unwords (path : args)
-#endif
+ | verbosity >= verbose   = putStrLn $ showCommandForUser path args
  | otherwise              = return ()
 
 printRawCommandAndArgsAndEnv :: Verbosity
@@ -365,40 +350,7 @@ printRawCommandAndArgsAndEnv verbosity path args env
  | otherwise              = return ()
 
 
--- This is taken directly from the process package.
--- The reason we need it is that runProcess doesn't handle ^C in the same
--- way that rawSystem handles it, but rawSystem doesn't allow us to pass
--- an environment.
-syncProcess :: String -> Process.CreateProcess -> IO ExitCode
-#if mingw32_HOST_OS
-syncProcess _fun c = do
-  (_,_,_,p) <- createProcess c
-  waitForProcess p
-#else
-syncProcess fun c = do
-  -- The POSIX version of system needs to do some manipulation of signal
-  -- handlers.  Since we're going to be synchronously waiting for the child,
-  -- we want to ignore ^C in the parent, but handle it the default way
-  -- in the child (using SIG_DFL isn't really correct, it should be the
-  -- original signal handler, but the GHC RTS will have already set up
-  -- its own handler and we don't want to use that).
-  r <- Exception.bracket (installHandlers) (restoreHandlers) $
-       (\_ -> do (_,_,_,p) <- runGenProcess_ fun c
-                              (Just defaultSignal) (Just defaultSignal)
-                 waitForProcess p)
-  return r
-    where
-      installHandlers = do
-        old_int  <- installHandler sigINT  Ignore Nothing
-        old_quit <- installHandler sigQUIT Ignore Nothing
-        return (old_int, old_quit)
-      restoreHandlers (old_int, old_quit) = do
-        _ <- installHandler sigINT  old_int Nothing
-        _ <- installHandler sigQUIT old_quit Nothing
-        return ()
-#endif  /* mingw32_HOST_OS */
-
--- Exit with the same exitcode if the subcommand fails
+-- Exit with the same exit code if the subcommand fails
 rawSystemExit :: Verbosity -> FilePath -> [String] -> IO ()
 rawSystemExit verbosity path args = do
   printRawCommandAndArgs verbosity path args
@@ -425,8 +377,10 @@ rawSystemExitWithEnv :: Verbosity
 rawSystemExitWithEnv verbosity path args env = do
     printRawCommandAndArgsAndEnv verbosity path args env
     hFlush stdout
-    exitcode <- syncProcess "rawSystemExitWithEnv" (proc path args)
-                { Process.env = Just env }
+    (_,_,_,ph) <- createProcess $
+                  (Process.proc path args) { Process.env = (Just env)
+                                           , Process.delegate_ctlc = True }
+    exitcode <- waitForProcess ph
     unless (exitcode == ExitSuccess) $ do
         debug verbosity $ path ++ " returned " ++ show exitcode
         exitWith exitcode
@@ -445,26 +399,20 @@ rawSystemIOWithEnv verbosity path args mcwd menv inp out err = do
     maybe (printRawCommandAndArgs       verbosity path args)
           (printRawCommandAndArgsAndEnv verbosity path args) menv
     hFlush stdout
-    exitcode <- syncProcess "rawSystemIOWithEnv" (proc path args)
-                { Process.cwd     = mcwd
-                , Process.env     = menv
-                , Process.std_in  = mbToStd inp
-                , Process.std_out = mbToStd out
-                , Process.std_err = mbToStd err }
-                `Exception.finally` (mapM_ maybeClose [inp, out, err])
+    (_,_,_,ph) <- createProcess $
+                  (Process.proc path args) { Process.cwd           = mcwd
+                                           , Process.env           = menv
+                                           , Process.std_in        = mbToStd inp
+                                           , Process.std_out       = mbToStd out
+                                           , Process.std_err       = mbToStd err
+                                           , Process.delegate_ctlc = True }
+    exitcode <- waitForProcess ph
     unless (exitcode == ExitSuccess) $ do
       debug verbosity $ path ++ " returned " ++ show exitcode
     return exitcode
   where
-  -- Also taken from System.Process
-  maybeClose :: Maybe Handle -> IO ()
-  maybeClose (Just  hdl)
-    | hdl /= stdin && hdl /= stdout && hdl /= stderr = hClose hdl
-  maybeClose _ = return ()
-
-  mbToStd :: Maybe Handle -> StdStream
-  mbToStd Nothing    = Inherit
-  mbToStd (Just hdl) = UseHandle hdl
+    mbToStd :: Maybe Handle -> Process.StdStream
+    mbToStd = maybe Process.Inherit Process.UseHandle
 
 -- | Run a command and return its output.
 --
@@ -580,7 +528,7 @@ findProgramVersion versionArg selectVersion verbosity path = do
   return version
 
 
--- | Like the unix xargs program. Useful for when we've got very long command
+-- | Like the Unix xargs program. Useful for when we've got very long command
 -- lines that might overflow an OS limit on command line length and so you
 -- need to invoke a command multiple times to get all the args in.
 --
@@ -825,7 +773,7 @@ createDirectoryIfMissingVerbose verbosity create_parents path0
           -- createDirectory (and indeed POSIX mkdir) does not distinguish
           -- between a dir already existing and a file already existing. So we
           -- check for it here. Unfortunately there is a slight race condition
-          -- here, but we think it is benign. It could report an exeption in
+          -- here, but we think it is benign. It could report an exception in
           -- the case that the dir did exist but another process deletes the
           -- directory and creates a file in its place before we can check
           -- that the directory did indeed exist.
@@ -1263,7 +1211,7 @@ writeUTF8File path = writeFileAtomic path . BS.Char8.pack . toUTF8
 normaliseLineEndings :: String -> String
 normaliseLineEndings [] = []
 normaliseLineEndings ('\r':'\n':s) = '\n' : normaliseLineEndings s -- windows
-normaliseLineEndings ('\r':s)      = '\n' : normaliseLineEndings s -- old osx
+normaliseLineEndings ('\r':s)      = '\n' : normaliseLineEndings s -- old OS X
 normaliseLineEndings (  c :s)      =   c  : normaliseLineEndings s
 
 -- ------------------------------------------------------------

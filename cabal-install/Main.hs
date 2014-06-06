@@ -1,3 +1,5 @@
+{-# LANGUAGE CPP #-}
+
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Main
@@ -36,10 +38,11 @@ import Distribution.Client.Setup
          , SDistFlags(..), SDistExFlags(..), sdistCommand
          , Win32SelfUpgradeFlags(..), win32SelfUpgradeCommand
          , SandboxFlags(..), sandboxCommand
+         , ExecFlags(..), execCommand
          , reportCommand
          )
 import Distribution.Simple.Setup
-         ( HaddockFlags(..), haddockCommand
+         ( HaddockFlags(..), haddockCommand, defaultHaddockFlags
          , HscolourFlags(..), hscolourCommand
          , ReplFlags(..), replCommand
          , CopyFlags(..), copyCommand
@@ -77,6 +80,7 @@ import Distribution.Client.Sandbox            (sandboxInit
                                               ,sandboxListSources
                                               ,sandboxHcPkg
                                               ,dumpPackageEnvironment
+                                              ,withSandboxBinDirOnSearchPath
 
                                               ,getSandboxConfigFilePath
                                               ,loadConfigOrSandboxConfig
@@ -93,16 +97,20 @@ import Distribution.Client.Sandbox            (sandboxInit
                                               ,configPackageDB')
 import Distribution.Client.Sandbox.PackageEnvironment
                                               (setPackageDB
+                                              ,sandboxPackageDBPath
                                               ,userPackageEnvironmentFile)
 import Distribution.Client.Sandbox.Timestamp  (maybeAddCompilerTimestampRecord)
 import Distribution.Client.Sandbox.Types      (UseSandbox(..), whenUsingSandbox)
 import Distribution.Client.Init               (initCabal)
 import qualified Distribution.Client.Win32SelfUpgrade as Win32SelfUpgrade
 import Distribution.Client.Utils              (determineNumJobs
+#if defined(mingw32_HOST_OS)
+                                              ,relaxEncodingErrors
+#endif
                                               ,existsAndIsMoreRecentThan)
 
 import Distribution.PackageDescription
-         ( Executable(..) )
+         ( Executable(..), benchmarkName, testName )
 import Distribution.PackageDescription.Parse
          ( readPackageDescription )
 import Distribution.PackageDescription.PrettyPrint
@@ -119,11 +127,14 @@ import Distribution.Simple.Configure
          , ConfigStateFileErrorType(..), localBuildInfoFile
          , getPersistBuildConfig, tryGetPersistBuildConfig )
 import qualified Distribution.Simple.LocalBuildInfo as LBI
-import Distribution.Simple.Program (defaultProgramConfiguration)
+import Distribution.Simple.GHC (ghcGlobalPackageDB)
+import Distribution.Simple.Program (defaultProgramConfiguration, lookupProgram, ghcProgram)
+import Distribution.Simple.Program.Run (getEffectiveEnvironment)
 import qualified Distribution.Simple.Setup as Cabal
 import Distribution.Simple.Utils
-         ( cabalVersion, die, notice, info, topHandler
-         , findPackageDesc, tryFindPackageDesc )
+         ( cabalVersion, debug, die, notice, info, topHandler
+         , findPackageDesc, tryFindPackageDesc , rawSystemExit
+         , rawSystemExitWithEnv )
 import Distribution.Text
          ( display )
 import Distribution.Verbosity as Verbosity
@@ -134,11 +145,15 @@ import qualified Paths_cabal_install_ssl (version)
 
 import System.Environment       (getArgs, getProgName)
 import System.Exit              (exitFailure)
-import System.FilePath          (splitExtension, takeExtension)
-import System.IO                (BufferMode(LineBuffering),
-                                 hSetBuffering, stdout)
+import System.FilePath          (splitExtension, takeExtension, searchPathSeparator)
+import System.IO                ( BufferMode(LineBuffering), hSetBuffering
+#ifdef mingw32_HOST_OS
+                                , stderr
+#endif
+                                , stdout )
 import System.Directory         (doesFileExist, getCurrentDirectory)
 import Data.List                (intercalate)
+import Data.Maybe               (mapMaybe)
 import Data.Monoid              (Monoid(..))
 import Control.Monad            (when, unless)
 
@@ -149,6 +164,13 @@ main = do
   -- Enable line buffering so that we can get fast feedback even when piped.
   -- This is especially important for CI and build systems.
   hSetBuffering stdout LineBuffering
+  -- The default locale encoding for Windows CLI is not UTF-8 and printing
+  -- Unicode characters to it will fail unless we relax the handling of encoding
+  -- errors when writing to stderr and stdout.
+#ifdef mingw32_HOST_OS
+  relaxEncodingErrors stdout
+  relaxEncodingErrors stderr
+#endif
   getArgs >>= mainWorker
 
 mainWorker :: [String] -> IO ()
@@ -214,10 +236,10 @@ mainWorker args = topHandler $
       ,replCommand defaultProgramConfiguration
                               `commandAddAction` replAction
       ,sandboxCommand         `commandAddAction` sandboxAction
+      ,haddockCommand         `commandAddAction` haddockAction
+      ,execCommand            `commandAddAction` execAction
       ,wrapperAction copyCommand
                      copyVerbosity     copyDistPref
-      ,wrapperAction haddockCommand
-                     haddockVerbosity  haddockDistPref
       ,wrapperAction cleanCommand
                      cleanVerbosity    cleanDistPref
       ,wrapperAction hscolourCommand
@@ -631,11 +653,14 @@ installAction (configFlags, configExFlags, installFlags, haddockFlags)
   let sandboxDistPref = case useSandbox of
         NoSandbox             -> NoFlag
         UseSandbox sandboxDir -> Flag $ sandboxBuildDir sandboxDir
-      configFlags'    = savedConfigureFlags   config `mappend` configFlags
+      configFlags'    = maybeForceTests installFlags' $
+                        savedConfigureFlags   config `mappend` configFlags
       configExFlags'  = defaultConfigExFlags         `mappend`
                         savedConfigureExFlags config `mappend` configExFlags
       installFlags'   = defaultInstallFlags          `mappend`
                         savedInstallFlags     config `mappend` installFlags
+      haddockFlags'   = defaultHaddockFlags          `mappend`
+                        savedHaddockFlags     config `mappend` haddockFlags
       globalFlags'    = savedGlobalFlags      config `mappend` globalFlags
   (comp, platform, conf) <- configCompilerAux' configFlags'
 
@@ -670,8 +695,15 @@ installAction (configFlags, configExFlags, installFlags, haddockFlags)
               comp platform conf
               useSandbox mSandboxPkgInfo
               globalFlags' configFlags'' configExFlags'
-              installFlags' haddockFlags
+              installFlags' haddockFlags'
               targets
+
+    where
+      -- '--run-tests' implies '--enable-tests'.
+      maybeForceTests installFlags' configFlags' =
+        if fromFlagOrDefault False (installRunTests installFlags')
+        then configFlags' { configTests = toFlag True }
+        else configFlags'
 
 testAction :: (TestFlags, BuildFlags, BuildExFlags) -> [String] -> GlobalFlags
               -> IO ()
@@ -695,12 +727,24 @@ testAction (testFlags, buildFlags, buildExFlags) extraArgs globalFlags = do
                           globalFlags noAddSource
                           (buildNumJobs buildFlags') checkFlags
 
+  -- the package was just configured, so the LBI must be available
+  lbi <- getPersistBuildConfig distPref
+  let pkgDescr = LBI.localPkgDescr lbi
+      nameTestsOnly = LBI.foldComponent (const Nothing)
+                                        (const Nothing)
+                                        (Just . testName)
+                                        (const Nothing)
+      tests = mapMaybe nameTestsOnly $ LBI.pkgComponents pkgDescr
+      extraArgs'
+        | null extraArgs = tests
+        | otherwise = extraArgs
+
   maybeWithSandboxDirOnSearchPath useSandbox $
-    build verbosity config distPref buildFlags' extraArgs
+    build verbosity config distPref buildFlags' extraArgs'
 
   maybeWithSandboxDirOnSearchPath useSandbox $
     setupWrapper verbosity setupOptions Nothing
-      Cabal.testCommand (const testFlags) extraArgs
+      Cabal.testCommand (const testFlags) extraArgs'
 
 benchmarkAction :: (BenchmarkFlags, BuildFlags, BuildExFlags)
                    -> [String] -> GlobalFlags
@@ -728,12 +772,38 @@ benchmarkAction (benchmarkFlags, buildFlags, buildExFlags)
                           globalFlags noAddSource (buildNumJobs buildFlags')
                           checkFlags
 
+  -- the package was just configured, so the LBI must be available
+  lbi <- getPersistBuildConfig distPref
+  let pkgDescr = LBI.localPkgDescr lbi
+      nameBenchsOnly = LBI.foldComponent (const Nothing)
+                                         (const Nothing)
+                                         (const Nothing)
+                                         (Just . benchmarkName)
+      benchs = mapMaybe nameBenchsOnly $ LBI.pkgComponents pkgDescr
+      extraArgs'
+        | null extraArgs = benchs
+        | otherwise = extraArgs
+
   maybeWithSandboxDirOnSearchPath useSandbox $
-    build verbosity config distPref buildFlags' extraArgs
+    build verbosity config distPref buildFlags' extraArgs'
 
   maybeWithSandboxDirOnSearchPath useSandbox $
     setupWrapper verbosity setupOptions Nothing
-      Cabal.benchmarkCommand (const benchmarkFlags) extraArgs
+      Cabal.benchmarkCommand (const benchmarkFlags) extraArgs'
+
+haddockAction :: HaddockFlags -> [String] -> GlobalFlags -> IO ()
+haddockAction haddockFlags extraArgs globalFlags = do
+  let verbosity = fromFlag (haddockVerbosity haddockFlags)
+  (_useSandbox, config) <- loadConfigOrSandboxConfig verbosity globalFlags mempty
+  let haddockFlags' = defaultHaddockFlags      `mappend`
+                      savedHaddockFlags config `mappend` haddockFlags
+      setupScriptOptions = defaultSetupScriptOptions {
+        useDistPref = fromFlagOrDefault
+                      (useDistPref defaultSetupScriptOptions)
+                      (haddockDistPref haddockFlags')
+        }
+  setupWrapper verbosity setupScriptOptions Nothing
+    haddockCommand (const haddockFlags') extraArgs
 
 listAction :: ListFlags -> [String] -> GlobalFlags -> IO ()
 listAction listFlags extraArgs globalFlags = do
@@ -986,6 +1056,38 @@ sandboxAction sandboxFlags extraArgs globalFlags = do
 
   where
     noExtraArgs = (<1) . length
+
+execAction :: ExecFlags -> [String] -> GlobalFlags -> IO ()
+execAction execFlags extraArgs globalFlags = do
+  let verbosity = fromFlag (execVerbosity execFlags)
+  (useSandbox, config) <- loadConfigOrSandboxConfig verbosity globalFlags
+                           mempty
+  case extraArgs of
+    (exec:args) -> do
+      case useSandbox of
+          NoSandbox ->
+              rawSystemExit verbosity exec args
+          (UseSandbox sandboxDir) -> do
+              let configFlags = savedConfigureFlags config
+              (comp, platform, conf) <- configCompilerAux' configFlags
+              withSandboxBinDirOnSearchPath sandboxDir $ do
+                  menv <- newEnv sandboxDir comp platform conf verbosity
+                  case menv of
+                      Just env -> rawSystemExitWithEnv verbosity exec args env
+                      Nothing  -> rawSystemExit        verbosity exec args
+    -- Error handling.
+    [] -> die $ "Please specify an executable to run"
+  where
+    newEnv sandboxDir comp platform conf verbosity = do
+        let s = sandboxPackageDBPath sandboxDir comp platform
+        case lookupProgram ghcProgram conf of
+            Nothing -> do
+                debug verbosity "sandbox exec only works with GHC"
+                exitFailure
+            Just ghcProg ->  do
+                g <- ghcGlobalPackageDB verbosity ghcProg
+                getEffectiveEnvironment
+                  [("GHC_PACKAGE_PATH", Just $ s ++ [searchPathSeparator] ++ g)]
 
 -- | See 'Distribution.Client.Install.withWin32SelfUpgrade' for details.
 --

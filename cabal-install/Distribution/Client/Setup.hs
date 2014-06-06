@@ -34,6 +34,7 @@ module Distribution.Client.Setup
     , sdistCommand, SDistFlags(..), SDistExFlags(..), ArchiveFormat(..)
     , win32SelfUpgradeCommand, Win32SelfUpgradeFlags(..)
     , sandboxCommand, defaultSandboxLocation, SandboxFlags(..)
+    , execCommand, ExecFlags(..)
 
     , parsePackageArgs
     --TODO: stop exporting these:
@@ -483,6 +484,7 @@ data FetchFlags = FetchFlags {
       fetchReorderGoals     :: Flag Bool,
       fetchIndependentGoals :: Flag Bool,
       fetchShadowPkgs       :: Flag Bool,
+      fetchStrongFlags      :: Flag Bool,
       fetchVerbosity :: Flag Verbosity
     }
 
@@ -496,6 +498,7 @@ defaultFetchFlags = FetchFlags {
     fetchReorderGoals     = Flag False,
     fetchIndependentGoals = Flag False,
     fetchShadowPkgs       = Flag False,
+    fetchStrongFlags      = Flag False,
     fetchVerbosity = toFlag normal
    }
 
@@ -537,6 +540,7 @@ fetchCommand = CommandUI {
                          fetchReorderGoals     (\v flags -> flags { fetchReorderGoals     = v })
                          fetchIndependentGoals (\v flags -> flags { fetchIndependentGoals = v })
                          fetchShadowPkgs       (\v flags -> flags { fetchShadowPkgs       = v })
+                         fetchStrongFlags      (\v flags -> flags { fetchStrongFlags      = v })
 
   }
 
@@ -546,22 +550,28 @@ fetchCommand = CommandUI {
 
 data FreezeFlags = FreezeFlags {
       freezeDryRun           :: Flag Bool,
+      freezeTests            :: Flag Bool,
+      freezeBenchmarks       :: Flag Bool,
       freezeSolver           :: Flag PreSolver,
       freezeMaxBackjumps     :: Flag Int,
       freezeReorderGoals     :: Flag Bool,
       freezeIndependentGoals :: Flag Bool,
       freezeShadowPkgs       :: Flag Bool,
+      freezeStrongFlags      :: Flag Bool,
       freezeVerbosity        :: Flag Verbosity
     }
 
 defaultFreezeFlags :: FreezeFlags
 defaultFreezeFlags = FreezeFlags {
     freezeDryRun           = toFlag False,
+    freezeTests            = toFlag False,
+    freezeBenchmarks       = toFlag False,
     freezeSolver           = Flag defaultSolver,
     freezeMaxBackjumps     = Flag defaultMaxBackjumps,
     freezeReorderGoals     = Flag False,
     freezeIndependentGoals = Flag False,
     freezeShadowPkgs       = Flag False,
+    freezeStrongFlags      = Flag False,
     freezeVerbosity        = toFlag normal
    }
 
@@ -580,6 +590,16 @@ freezeCommand = CommandUI {
            freezeDryRun (\v flags -> flags { freezeDryRun = v })
            trueArg
 
+       , option [] ["tests"]
+           "freezing of the dependencies of any tests suites in the package description file."
+           freezeTests (\v flags -> flags { freezeTests = v })
+           (boolOpt [] [])
+
+       , option [] ["benchmarks"]
+           "freezing of the dependencies of any benchmarks suites in the package description file."
+           freezeBenchmarks (\v flags -> flags { freezeBenchmarks = v })
+           (boolOpt [] [])
+
        ] ++
 
        optionSolver      freezeSolver           (\v flags -> flags { freezeSolver           = v }) :
@@ -588,6 +608,7 @@ freezeCommand = CommandUI {
                          freezeReorderGoals     (\v flags -> flags { freezeReorderGoals     = v })
                          freezeIndependentGoals (\v flags -> flags { freezeIndependentGoals = v })
                          freezeShadowPkgs       (\v flags -> flags { freezeShadowPkgs       = v })
+                         freezeStrongFlags      (\v flags -> flags { freezeStrongFlags      = v })
 
   }
 
@@ -921,6 +942,7 @@ data InstallFlags = InstallFlags {
     installReorderGoals     :: Flag Bool,
     installIndependentGoals :: Flag Bool,
     installShadowPkgs       :: Flag Bool,
+    installStrongFlags      :: Flag Bool,
     installReinstall        :: Flag Bool,
     installAvoidReinstalls  :: Flag Bool,
     installOverrideReinstall :: Flag Bool,
@@ -933,7 +955,8 @@ data InstallFlags = InstallFlags {
     installBuildReports     :: Flag ReportLevel,
     installSymlinkBinDir    :: Flag FilePath,
     installOneShot          :: Flag Bool,
-    installNumJobs          :: Flag (Maybe Int)
+    installNumJobs          :: Flag (Maybe Int),
+    installRunTests         :: Flag Bool
   }
 
 defaultInstallFlags :: InstallFlags
@@ -945,6 +968,7 @@ defaultInstallFlags = InstallFlags {
     installReorderGoals    = Flag False,
     installIndependentGoals= Flag False,
     installShadowPkgs      = Flag False,
+    installStrongFlags     = Flag False,
     installReinstall       = Flag False,
     installAvoidReinstalls = Flag False,
     installOverrideReinstall = Flag False,
@@ -957,7 +981,8 @@ defaultInstallFlags = InstallFlags {
     installBuildReports    = Flag NoReports,
     installSymlinkBinDir   = mempty,
     installOneShot         = Flag False,
-    installNumJobs         = mempty
+    installNumJobs         = mempty,
+    installRunTests        = mempty
   }
   where
     docIndexFile = toPathTemplate ("$datadir" </> "doc" </> "index.html")
@@ -984,7 +1009,7 @@ allowNewerPrinter NoFlag                       = []
 
 
 defaultMaxBackjumps :: Int
-defaultMaxBackjumps = 200
+defaultMaxBackjumps = 2000
 
 defaultSolver :: PreSolver
 defaultSolver = Choose
@@ -1070,7 +1095,8 @@ installOptions showOrParseArgs =
                         installMaxBackjumps     (\v flags -> flags { installMaxBackjumps     = v })
                         installReorderGoals     (\v flags -> flags { installReorderGoals     = v })
                         installIndependentGoals (\v flags -> flags { installIndependentGoals = v })
-                        installShadowPkgs       (\v flags -> flags { installShadowPkgs       = v }) ++
+                        installShadowPkgs       (\v flags -> flags { installShadowPkgs       = v })
+                        installStrongFlags      (\v flags -> flags { installStrongFlags      = v }) ++
 
       [ option [] ["reinstall"]
           "Install even if it means installing the same version again."
@@ -1136,6 +1162,11 @@ installOptions showOrParseArgs =
           installOneShot (\v flags -> flags { installOneShot = v })
           (yesNoOpt showOrParseArgs)
 
+      , option [] ["run-tests"]
+          "Run package test suites during installation."
+          installRunTests (\v flags -> flags { installRunTests = v })
+          trueArg
+
       , optionNumJobs
         installNumJobs (\v flags -> flags { installNumJobs = v })
 
@@ -1162,6 +1193,7 @@ instance Monoid InstallFlags where
     installReorderGoals    = mempty,
     installIndependentGoals= mempty,
     installShadowPkgs      = mempty,
+    installStrongFlags     = mempty,
     installOnly            = mempty,
     installOnlyDeps        = mempty,
     installRootCmd         = mempty,
@@ -1170,7 +1202,8 @@ instance Monoid InstallFlags where
     installBuildReports    = mempty,
     installSymlinkBinDir   = mempty,
     installOneShot         = mempty,
-    installNumJobs         = mempty
+    installNumJobs         = mempty,
+    installRunTests        = mempty
   }
   mappend a b = InstallFlags {
     installDocumentation   = combine installDocumentation,
@@ -1184,6 +1217,7 @@ instance Monoid InstallFlags where
     installReorderGoals    = combine installReorderGoals,
     installIndependentGoals= combine installIndependentGoals,
     installShadowPkgs      = combine installShadowPkgs,
+    installStrongFlags     = combine installStrongFlags,
     installOnly            = combine installOnly,
     installOnlyDeps        = combine installOnlyDeps,
     installRootCmd         = combine installRootCmd,
@@ -1192,7 +1226,8 @@ instance Monoid InstallFlags where
     installBuildReports    = combine installBuildReports,
     installSymlinkBinDir   = combine installSymlinkBinDir,
     installOneShot         = combine installOneShot,
-    installNumJobs         = combine installNumJobs
+    installNumJobs         = combine installNumJobs,
+    installRunTests        = combine installRunTests
   }
     where combine field = field a `mappend` field b
 
@@ -1323,7 +1358,9 @@ initCommand = CommandUI {
       , option ['p'] ["package-name"]
         "Name of the Cabal package to create."
         IT.packageName (\v flags -> flags { IT.packageName = v })
-        (reqArgFlag "PACKAGE")
+        (reqArg "PACKAGE" (readP_to_E ("Cannot parse package name: "++)
+                                      (toFlag `fmap` parse))
+                          (flagToList . fmap display))
 
       , option [] ["version"]
         "Initial version of the package."
@@ -1388,6 +1425,12 @@ initCommand = CommandUI {
         IT.packageType
         (\v flags -> flags { IT.packageType = v })
         (noArg (Flag IT.Executable))
+
+      , option [] ["main-is"]
+        "Specify the main module."
+        IT.mainIs
+        (\v flags -> flags { IT.mainIs = v })
+        (reqArgFlag "FILE")
 
       , option [] ["language"]
         "Specify the default language."
@@ -1592,6 +1635,44 @@ instance Monoid SandboxFlags where
     where combine field = field a `mappend` field b
 
 -- ------------------------------------------------------------
+-- * Exec Flags
+-- ------------------------------------------------------------
+
+data ExecFlags = ExecFlags {
+  execVerbosity :: Flag Verbosity
+}
+
+defaultExecFlags :: ExecFlags
+defaultExecFlags = ExecFlags {
+  execVerbosity = toFlag normal
+  }
+
+execCommand :: CommandUI ExecFlags
+execCommand = CommandUI {
+  commandName         = "exec",
+  commandSynopsis     = "Run a command with the cabal environment",
+  commandDescription  = Nothing,
+  commandUsage        = \pname ->
+       "Usage: " ++ pname ++ " exec [FLAGS] COMMAND [-- [ARGS...]]\n\n"
+    ++ "Flags for exec:",
+
+  commandDefaultFlags = defaultExecFlags,
+  commandOptions      = \_ ->
+    [ optionVerbosity execVerbosity
+      (\v flags -> flags { execVerbosity = v })
+    ]
+  }
+
+instance Monoid ExecFlags where
+  mempty = ExecFlags {
+    execVerbosity = mempty
+    }
+  mappend a b = ExecFlags {
+    execVerbosity = combine execVerbosity
+    }
+    where combine field = field a `mappend` field b
+
+-- ------------------------------------------------------------
 -- * GetOpt Utils
 -- ------------------------------------------------------------
 
@@ -1623,8 +1704,9 @@ optionSolverFlags :: ShowOrParseArgs
                   -> (flags -> Flag Bool  ) -> (Flag Bool   -> flags -> flags)
                   -> (flags -> Flag Bool  ) -> (Flag Bool   -> flags -> flags)
                   -> (flags -> Flag Bool  ) -> (Flag Bool   -> flags -> flags)
+                  -> (flags -> Flag Bool  ) -> (Flag Bool   -> flags -> flags)
                   -> [OptionField flags]
-optionSolverFlags showOrParseArgs getmbj setmbj getrg setrg _getig _setig getsip setsip =
+optionSolverFlags showOrParseArgs getmbj setmbj getrg setrg _getig _setig getsip setsip getstrfl setstrfl =
   [ option [] ["max-backjumps"]
       ("Maximum number of backjumps allowed while solving (default: " ++ show defaultMaxBackjumps ++ "). Use a negative number to enable unlimited backtracking. Use 0 to disable backtracking completely.")
       getmbj setmbj
@@ -1645,7 +1727,11 @@ optionSolverFlags showOrParseArgs getmbj setmbj getrg setrg _getig _setig getsip
   , option [] ["shadow-installed-packages"]
       "If multiple package instances of the same version are installed, treat all but one as shadowed."
       getsip setsip
-      trueArg
+      (yesNoOpt showOrParseArgs)
+  , option [] ["strong-flags"]
+      "Do not defer flag choices (this used to be the default in cabal-install <= 1.20)."
+      getstrfl setstrfl
+      (yesNoOpt showOrParseArgs)
   ]
 
 

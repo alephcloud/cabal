@@ -613,7 +613,7 @@ data BuildInfo = BuildInfo {
         pkgconfigDepends  :: [Dependency], -- ^ pkg-config packages that are used
         frameworks        :: [String], -- ^support frameworks for Mac OS X
         cSources          :: [FilePath],
-        hsSourceDirs      :: [FilePath], -- ^ where to look for the haskell module hierarchy
+        hsSourceDirs      :: [FilePath], -- ^ where to look for the Haskell module hierarchy
         otherModules      :: [ModuleName], -- ^ non-exposed or non-main modules
 
         defaultLanguage   :: Maybe Language,-- ^ language used when not explicitly specified
@@ -899,7 +899,7 @@ updatePackageDescription (mb_lib_bi, exe_bi) p
 
       updateExecutable :: (String, BuildInfo) -- ^(exeName, new buildinfo)
                        -> [Executable]        -- ^list of executables to update
-                       -> [Executable]        -- ^libst with exeName updated
+                       -> [Executable]        -- ^list with exeName updated
       updateExecutable _                 []         = []
       updateExecutable exe_bi'@(name,bi) (exe:exes)
         | exeName exe == name = exe{buildInfo = bi `mappend` buildInfo exe} : exes
@@ -952,13 +952,6 @@ data ConfVar = OS OS
              | Impl CompilerFlavor VersionRange
     deriving (Eq, Show, Typeable, Data)
 
---instance Text ConfVar where
---    disp (OS os) = "os(" ++ display os ++ ")"
---    disp (Arch arch) = "arch(" ++ display arch ++ ")"
---    disp (Flag (ConfFlag f)) = "flag(" ++ f ++ ")"
---    disp (Impl c v) = "impl(" ++ display c
---                       ++ " " ++ display v ++ ")"
-
 -- | A boolean expression parameterized over the variable type used.
 data Condition c = Var c
                  | Lit Bool
@@ -966,13 +959,6 @@ data Condition c = Var c
                  | COr (Condition c) (Condition c)
                  | CAnd (Condition c) (Condition c)
     deriving (Show, Eq, Typeable, Data)
-
---instance Text c => Text (Condition c) where
---  disp (Var x) = text (show x)
---  disp (Lit b) = text (show b)
---  disp (CNot c) = char '!' <> parens (ppCond c)
---  disp (COr c1 c2) = parens $ sep [ppCond c1, text "||" <+> ppCond c2]
---  disp (CAnd c1 c2) = parens $ sep [ppCond c1, text "&&" <+> ppCond c2]
 
 data CondTree v c a = CondNode
     { condTreeData        :: a
@@ -982,16 +968,3 @@ data CondTree v c a = CondNode
                               , Maybe (CondTree v c a))]
     }
     deriving (Show, Eq, Typeable, Data)
-
---instance (Text v, Text c) => Text (CondTree v c a) where
---  disp (CondNode _dat cs ifs) =
---    (text "build-depends: " <+>
---      disp cs)
---    $+$
---    (vcat $ map ppIf ifs)
---  where
---    ppIf (c,thenTree,mElseTree) =
---        ((text "if" <+> ppCond c <> colon) $$
---          nest 2 (ppCondTree thenTree disp))
---        $+$ (maybe empty (\t -> text "else: " $$ nest 2 (ppCondTree t disp))
---                   mElseTree)

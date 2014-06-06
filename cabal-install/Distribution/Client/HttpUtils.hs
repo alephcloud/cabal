@@ -30,6 +30,8 @@ import Distribution.Verbosity (Verbosity)
 import Distribution.Simple.Utils
          ( die, info, warn, debug, notice
          , copyFileVerbose, writeFileAtomic )
+import Distribution.System
+         ( buildOS, buildArch )
 import Distribution.Text
          ( display )
 import Data.Char ( isSpace )
@@ -65,7 +67,7 @@ import System.IO.Unsafe ( unsafePerformIO )
 
 data DownloadResult = FileAlreadyInCache | FileDownloaded FilePath deriving (Eq)
 
--- Trime
+-- Trim
 trim :: String -> String
 trim = f . f
       where f = reverse . dropWhile isSpace
